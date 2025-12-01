@@ -10,30 +10,24 @@ inputs:
   # Optional
   config_url:
     description: 'Download URL for pre-commit linting configuration file'
-    type: 'string'
     required: false
   dependencies_url:
     description: 'Download location for additional Python dependencies'
-    type: 'string'
     required: false
   branch_name:
     # Prevents linting errors that mandate changes be made on a branch
     description: 'Checkout this branch name prior to running linting'
-    type: 'string'
   path_prefix:
     description: 'Directory location containing project code'
     required: false
-    type: 'string'
     default: '.'
   no_checkout:
     description: 'Do not checkout local repository; used for testing'
-    type: 'boolean'
     required: false
     default: false
   python-version:
     # Only used when pyproject.toml file not present
     description: 'Python version used to run pre-commit hooks'
-    type: 'string'
     required: false
     default: '3.12'
 
