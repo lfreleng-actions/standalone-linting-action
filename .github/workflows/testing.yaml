@@ -22,6 +22,7 @@ jobs:
     runs-on: 'ubuntu-24.04'
     permissions:
       contents: read
+    timeout-minutes: 8
     steps:
       # Needed to locally invoke the action when testing
       # yamllint disable-line rule:line-length
