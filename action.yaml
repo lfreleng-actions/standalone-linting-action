@@ -89,7 +89,7 @@ runs:
     - name: 'Download Python dependencies configuration'
       if: inputs.dependencies_url != ''
       # yamllint disable-line rule:line-length
-      uses: lfreleng-actions/url-download-action@fea05e25548bffe5c238e669f534ef33de1f827d # v0.1.4
+      uses: lfreleng-actions/url-download-action@77920845b3cef96fac9ef287dcff261b24a12341 # v0.1.5
       with:
         url: "${{ inputs.dependencies_url }}"
         path: '/tmp/requirements.txt'
@@ -105,7 +105,7 @@ runs:
       # yamllint disable-line rule:line-length
       if: inputs.config_url != ''
       # yamllint disable-line rule:line-length
-      uses: lfreleng-actions/url-download-action@fea05e25548bffe5c238e669f534ef33de1f827d # v0.1.4
+      uses: lfreleng-actions/url-download-action@77920845b3cef96fac9ef287dcff261b24a12341 # v0.1.5
       with:
         url: "${{ inputs.config_url }}"
         # Will overwrite existing file; upstream action uses "wget -O" flag
