@@ -4,14 +4,14 @@
 
 # Fixture configuration for the skip_hooks tests in testing.yaml.
 #
-# It pairs a hook that always passes with one that always FAILS, so an
-# exclusion test cannot pass by accident. Skipping 'always-fails' has
-# to change the outcome: without a working '--skip' the run fails, and
+# Every hook here either always passes or always FAILS, so an
+# exclusion test cannot pass by accident: skipping a failing hook has
+# to change the outcome. Without a working exclusion the run fails;
 # with one it succeeds.
 #
-# An earlier version of that test excluded two hooks which passed
-# anyway, so removing '--skip' altogether produced the same green
-# result -- a fixture asserting nothing about the feature it named.
+# An earlier version excluded two hooks that passed anyway, so
+# removing the exclusion altogether produced the same green result --
+# a fixture asserting nothing about the feature it named.
 #
 # Not discovered by prek's workspace mode: that looks for prek.toml,
 # .pre-commit-config.yaml and .pre-commit-config.yml, and this is none
@@ -21,6 +21,7 @@ repos:
   - repo: local
     hooks:
       - id: always-passes
+        alias: passes-by-alias
         name: 'Always passes'
         entry: 'true'
         language: system
@@ -30,6 +31,46 @@ repos:
       - id: always-fails
         name: 'Always fails'
         entry: 'false'
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      # Carries an ALIAS, which prek's '--skip' matches as readily as
+      # an id. Excluding by alias is the case an id-to-id comparison
+      # in the action missed: the hook ran despite being excluded,
+      # but only in the modes that name hooks.
+      - id: aliased-failure
+        alias: friendly-name
+        name: 'Always fails, reachable by alias'
+        entry: 'false'
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      # A DUPLICATE id, one instance failing and one passing, each
+      # reachable by its own alias.
+      #
+      # prek permits an id to appear more than once and matches a
+      # selector against either id or alias. Excluding one instance
+      # must leave the other running, so the id SURVIVES in the
+      # resolved selection -- and a bare 'prek run -- twin' would
+      # then re-select both and run the excluded one. Only forwarding
+      # the exclusions to the per-hook invocation keeps them apart.
+      #
+      # The excluded instance fails, so a test cannot pass unless the
+      # exclusion actually reached prek.
+      - id: twin
+        alias: twin-bad
+        name: 'Twin that always fails'
+        entry: 'false'
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: twin
+        alias: twin-good
+        name: 'Twin that always passes'
+        entry: 'true'
         language: system
         pass_filenames: false
         always_run: true

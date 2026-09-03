@@ -39,8 +39,12 @@
 #     directory (never overwriting repository files, and never a
 #     predictable path a symlink could redirect), is size- and
 #     time-capped, and supports sha256 integrity pinning.
-#     (never overwriting repository files), is size- and time-capped,
-#     and supports sha256 integrity pinning.
+#   * uvx runs with '--no-config'. Measured against uv 0.11.21,
+#     'uv tool run' does NOT discover a working-directory uv.toml or
+#     '[tool.uv]' the way 'uv run' does -- so a fork-committed one
+#     cannot redirect where prek installs from today. The flag makes
+#     that a stated property rather than an incidental one, since
+#     nothing in uv's contract promises the asymmetry will hold.
 name: '⛔️ Standalone Linting Action'
 description: 'Runs pre-commit linting hooks with prek, outside pre-commit.ci'
 
@@ -49,10 +53,11 @@ inputs:
   hooks:
     description: >-
       Space or comma separated hook ids to run from the configuration.
-      Hook ids must match [A-Za-z0-9._-]; the action rejects anything
-      else rather than pass it to a shell. Empty selects the default
-      mode: run the hooks listed under 'ci.skip' in the configuration
-      file.
+      A hook's 'alias' works here as readily as its id, since prek's
+      selectors match either. Names must match [A-Za-z0-9._-]; the
+      action rejects anything else rather than pass it to a shell.
+      Empty selects the default mode: run the hooks listed under
+      'ci.skip' in the configuration file.
     required: false
     default: ''
   run_all_hooks:
@@ -64,24 +69,39 @@ inputs:
     default: 'false'
   skip_hooks:
     description: >-
-      Space or comma separated hook ids to EXCLUDE from the run, the
-      inverse of the hooks input. Held to the same id rules. This is
-      how a caller expresses 'run everything except these', which the
-      hooks input cannot: hooks names a subset to include.
+      Space or comma separated hook ids or ALIASES to EXCLUDE from the
+      run, the inverse of the hooks input. Held to the same id rules.
+      This is how a caller expresses 'run everything except these',
+      which the hooks input cannot: hooks names a subset to include.
 
       Combines with run_all_hooks (run everything but these) and with
-      hooks (run these, minus any also named here) alike.
+      hooks (run these, minus any also named here) alike. Excluding
+      every hook is a clean no-op in both.
 
-      Applied by two mechanisms, because the two modes resolve the
-      hook set in different places. Under run_all_hooks, prek chooses
-      the set, so the ids pass to it as '--skip'. In per-hook mode
-      this action chooses the set, so the ids are subtracted from it
-      here and never reach prek -- which keeps hooks_run reporting
-      what ran rather than what was asked for. Excluding every hook
-      is a no-op in both.
+      prek resolves the matching, on every path, so an exclusion may
+      name a hook's 'alias' as readily as its id. In per-hook mode
+      the action asks prek which hooks survive, drops the ones that
+      will not run, and forwards the exclusions to each invocation --
+      so hooks_run reports what ran, and a hook id appearing twice
+      keeps the instance that was not excluded.
 
-      Prek treats an id that matches no hook as a no-op, so a stale
-      entry weakens the run without failing it; keep the list current.
+      Two things stop a hook running, and both remove it from
+      hooks_run. One is an exclusion prek confirms it applied. The
+      other is stage: a run reaches pre-commit hooks, and manual ones
+      when named, so a hook left with only pre-push or commit-msg
+      instances is dropped rather than reported as a pass it never
+      earned.
+
+      An ambient SKIP or PREK_SKIP in the environment is merged
+      rather than overridden: prek reads those only when no CLI
+      '--skip' is present, so passing this input alone would
+      suppress them and run a hook the environment had excluded.
+      PREK_SKIP wins over SKIP when both are set, matching prek.
+
+      prek treats an id matching no hook as a no-op, so a stale entry
+      weakens the run without failing it; keep the list current. A
+      requested hook that the configuration does not define is NOT
+      silently dropped -- it reaches prek, which refuses it.
     required: false
     default: ''
   config_path:
@@ -131,7 +151,11 @@ inputs:
     required: false
     default: ''
   prek_version:
-    description: 'Version of prek used to run the hooks (X.Y.Z)'
+    description: >-
+      Version of prek used to run the hooks (X.Y.Z). Must be 0.2.20
+      or newer, where prek gained the JSON hook listing, selector
+      support for list, and the manual-stage fallback this action
+      reads.
     required: false
     default: '0.4.14'
 
@@ -141,8 +165,10 @@ outputs:
     value: ${{ steps.resolve.outputs.config_file }}
   hooks_run:
     description: >-
-      Space-separated hook ids the action ran; 'all' when
-      run_all_hooks was set; empty when there was nothing to do.
+      Space-separated hook names the action ran, echoing whichever
+      form the caller asked for -- an id, or an alias where one was
+      named; 'all' when run_all_hooks was set; empty when there was
+      nothing to do.
     value: ${{ steps.resolve.outputs.hooks_label }}
 
 runs:
@@ -265,8 +291,42 @@ runs:
           fi
         fi
         if ! printf '%s' "$INPUT_PREK_VERSION" |
-          grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-          err 'prek_version must be a bare X.Y.Z version'
+          grep -qE '^[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}$'; then
+          err 'prek_version must be X.Y.Z, each part 1-6 digits'
+        else
+          # The resolver depends on three prek features, and the
+          # newest sets the floor:
+          #
+          #   0.0.25  'list --output-format json'
+          #   0.2.0   project and hook SELECTORS, so 'list --skip'
+          #   0.2.20  naming a hook falls back to the manual stage
+          #
+          # The last is what 'manual' in the runnable stage set below
+          # relies on. An older pin would either fail every exclusion
+          # query or quietly disagree about which hooks a run
+          # reaches, so refuse it here with a reason instead.
+          IFS='.' read -r prek_major prek_minor prek_patch \
+            <<< "$INPUT_PREK_VERSION"
+          # '10#' forces base ten: a field written '08' would
+          # otherwise be read as octal and abort the arithmetic. The
+          # digit bound above keeps each field well inside what bash
+          # arithmetic holds -- a twenty-digit field wraps to a
+          # smaller number rather than failing, so '0.0.9999...'
+          # would compare as something else entirely.
+          prek_major=$((10#$prek_major))
+          prek_minor=$((10#$prek_minor))
+          prek_patch=$((10#$prek_patch))
+          # Compared component by component, NOT packed into a single
+          # number. Packing needs a fixed radix, and the fields are
+          # not bounded by it: at radix 100000 the version
+          # '0.1.100020' packs to 200020, exactly what '0.2.20'
+          # packs to, so it passed a floor that every 0.1.x predates.
+          if [ "$prek_major" -eq 0 ] &&
+            { [ "$prek_minor" -lt 2 ] ||
+              { [ "$prek_minor" -eq 2 ] &&
+                [ "$prek_patch" -lt 20 ]; }; }; then
+            err 'prek_version must be 0.2.20 or newer'
+          fi
         fi
         if [ -n "$INPUT_BRANCH_NAME" ]; then
           if ! printf '%s' "$INPUT_BRANCH_NAME" |
@@ -430,6 +490,95 @@ runs:
         run_all='false'
         run_needed='true'
         no_work_reason=''
+
+        # The EFFECTIVE exclusion set: skip_hooks plus whatever the
+        # environment already asked for.
+        #
+        # prek honours 'SKIP'/'PREK_SKIP' only when no CLI '--skip' is
+        # present, so passing skip_hooks on the command line SUPPRESSES
+        # an ambient value -- silently running a hook the caller had
+        # already excluded. Merging the two preserves both, and keeps
+        # one list behind every decision below: the filtered listing
+        # that computes what to drop, and the invocations that run.
+        #
+        # Precedence follows prek, which honours PREK_SKIP whenever
+        # the variable EXISTS -- empty included, where an empty value
+        # disables the SKIP fallback entirely:
+        #
+        #   $ PREK_SKIP='' SKIP=root-hook prek list
+        #   frontend:eslint
+        #   .:root-hook                    # nothing skipped
+        #
+        # Hence the unset-only expansion. A ':-' default would read
+        # an explicitly empty PREK_SKIP as absent and apply SKIP,
+        # against what the caller asked for.
+        ambient_skips="${PREK_SKIP-${SKIP-}}"
+
+        # Built as an ARRAY, because the two sources do not share a
+        # grammar and a joined string cannot be re-split correctly.
+        effective_list=()
+
+        # skip_hooks: space OR comma separated, as documented, and
+        # validated to hook ids -- which cannot contain a space, so
+        # IFS splitting is exact here.
+        if [ -n "$INPUT_SKIP_HOOKS" ]; then
+          read -ra skip_hook_items <<< "${INPUT_SKIP_HOOKS//,/ }"
+          for skip_item in "${skip_hook_items[@]}"; do
+            [ -n "$skip_item" ] && effective_list+=("$skip_item")
+          done
+        fi
+
+        if [ -n "$ambient_skips" ]; then
+          # Control characters on the WHOLE value, before splitting.
+          # A value spelling 'valid<newline>hooks=...' would
+          # otherwise validate its first line while the remainder
+          # travelled into the resolver's output, where a newline
+          # starts a new record and can overwrite another.
+          if [[ "$ambient_skips" == *[$'\n\r\t\v\f']* ]]; then
+            echo "::error::SKIP/PREK_SKIP must not contain control" \
+              "characters ❌"
+            exit 1
+          fi
+          # prek splits these on COMMAS ALONE and trims each item, so
+          # a selector may contain spaces -- a workspace project
+          # directory named 'frontend app' is excluded as
+          # 'frontend app/':
+          #
+          #   $ SKIP='root-hook, frontend app/' prek list
+          #   (empty: both excluded)
+          #
+          # Splitting on IFS would break that into 'frontend' and
+          # 'app/', and the exclusion would silently not apply.
+          old_ifs="$IFS"
+          IFS=','
+          read -ra ambient_items <<< "$ambient_skips"
+          IFS="$old_ifs"
+          for ambient_item in "${ambient_items[@]}"; do
+            # Trim, as prek does.
+            ambient_item="${ambient_item#"${ambient_item%%[![:space:]]*}"}"
+            ambient_item="${ambient_item%"${ambient_item##*[![:space:]]}"}"
+            [ -n "$ambient_item" ] || continue
+            # NOT held to the hook-id contract that skip_hooks is.
+            # These carry prek SELECTORS, a wider grammar: 'frontend/'
+            # names a project and 'frontend:eslint' a qualified hook.
+            # Since this branch runs whenever the environment is set
+            # -- skip_hooks or not -- an id check would fail existing
+            # workspace callers before prek saw their selector.
+            #
+            # Refuse what cannot be forwarded safely instead: a
+            # leading '-' reads as an option, and '--skip' takes its
+            # value as a separate argument so no '--' terminator
+            # stands behind it. Quoting covers the rest.
+            case "$ambient_item" in
+              -*)
+                echo "::error::SKIP/PREK_SKIP entry must not start" \
+                  "with '-': $ambient_item ❌"
+                exit 1
+                ;;
+            esac
+            effective_list+=("$ambient_item")
+          done
+        fi
         if [ -n "$INPUT_HOOKS" ]; then
           hooks=$(printf '%s' "$INPUT_HOOKS" | tr ',' ' ' |
             tr -s ' ' | sed -e 's/^ //' -e 's/ $//')
@@ -447,7 +596,13 @@ runs:
         else
           # Default mode: run the hooks pre-commit.ci skips. Parse
           # ci.skip and keep only ids the configuration defines.
-          hooks=$(uv run --no-project --with pyyaml==6.0.2 \
+          #
+          # '--no-config' because 'uv run' reads a 'uv.toml' from the
+          # working directory, which is the checkout being linted --
+          # so without it the repository under test could redirect
+          # the index this action's own tooling comes from.
+          hooks=$(uv run --no-config --no-project \
+            --with pyyaml==6.0.2 \
             python - "$cfg" <<'PYEOF'
         import re
         import sys
@@ -494,26 +649,210 @@ runs:
         # filtering', so the summary recorded a CROSS and failed the
         # run for a hook the caller asked to exclude -- while
         # hooks_run claimed it had run.
-        if [ -n "$INPUT_SKIP_HOOKS" ] && [ "$run_all" != 'true' ] &&
-          [ -n "$hooks" ]; then
-          read -ra skip_ids <<< "${INPUT_SKIP_HOOKS//,/ }"
-          kept=''
-          for hook_id in $hooks; do
-            excluded='false'
-            for skip_id in "${skip_ids[@]}"; do
-              if [ "$hook_id" = "$skip_id" ]; then
-                excluded='true'
-                break
-              fi
-            done
-            if [ "$excluded" = 'false' ]; then
-              kept="${kept:+$kept }$hook_id"
-            fi
+        #
+        # Ask PREK which hooks survive, rather than comparing ids
+        # here. '--skip' matches a hook's ALIAS as well as its id:
+        #
+        #   hooks:      - id: real-id
+        #                 alias: friendly-name
+        #   $ prek run --all-files --config cfg.yaml \
+        #       --skip friendly-name
+        #   other hook..............................Passed
+        #
+        # so string equality left an aliased exclusion running in
+        # this mode while the run-all path excluded it. One input,
+        # two answers, and the mode decided which -- with the
+        # exclusion silently ignored in the mode that named hooks.
+        #
+        # 'prek list' applies the same selectors 'prek run' does, so
+        # the surviving set is prek's own answer rather than a second
+        # implementation of its matching rules.
+        if [ "${#effective_list[@]}" -gt 0 ] &&
+          [ "$run_all" != 'true' ] && [ -n "$hooks" ]; then
+          list_args=()
+          for skip_id in "${effective_list[@]}"; do
+            list_args+=(--skip "$skip_id")
           done
-          hooks="$kept"
+          list_status=0
+          # ONE query, and it carries the selectors.
+          #
+          # An unfiltered baseline used to supply the defined set,
+          # but 'prek list' initialises hooks, and with no selectors
+          # that means cloning every remote repo the configuration
+          # names. A hook excluded BECAUSE it is unavailable would
+          # then fail the action anyway, defeating the exclusion.
+          # Measured against prek 0.4.10 with an unreachable remote:
+          #
+          #   $ prek list --config cfg.yaml                  exit 2
+          #   $ prek list --config cfg.yaml --skip broken    exit 0
+          #   $ prek run --config cfg.yaml --skip broken \
+          #       -- good                      Local good hook Passed
+          #
+          # The defined set comes from the configuration file below
+          # instead. That question is syntactic -- does the file
+          # mention this name -- so the file answers it exactly,
+          # while prek keeps deciding what MATCHES.
+          #
+          # JSON because the text form prints '<project>:<hook-id>'
+          # with nothing escaped, and prek places NO restriction on
+          # the shape of an id, so that line cannot be taken apart
+          # reliably:
+          #
+          #   $ prek list --config cfg.yaml
+          #   .:x:no-such-hook
+          #
+          # Splitting at the last colon yielded 'no-such-hook', so an
+          # undefined hook of that name looked excluded and was
+          # dropped unrun. An id spelling '*' defeated shell
+          # tokenising the same way. JSON carries the id, and the
+          # alias, as their own fields.
+          #
+          # Written to a FILE, not captured into a variable: prek's
+          # JSON carries each hook's name, description and stage
+          # list, and Linux caps a single environment string at
+          # roughly 128 KiB (MAX_ARG_STRLEN).
+          listing_dir=$(mktemp -d "$RUNNER_TEMP/prek-listing.XXXXXXXX")
+          surviving="$listing_dir/surviving.json"
+          uvx --no-config "prek@$INPUT_PREK_VERSION" \
+            list --config "$cfg" --output-format json \
+            "${list_args[@]+"${list_args[@]}"}" \
+            > "$surviving" || list_status=$?
+          if [ "$list_status" -ne 0 ]; then
+            # Source-neutral: the selectors behind this query may have
+            # come from skip_hooks, from an ambient SKIP/PREK_SKIP,
+            # or from both, so naming the input would send a caller
+            # to look at something they never set.
+            echo '::error::could not resolve the hook exclusions' \
+              'against the configuration ❌'
+            echo '::error::Refusing to guess which hooks run:' \
+              'reporting a pass for a set this action could not' \
+              'determine would be the green check that linted' \
+              'nothing.'
+            exit 1
+          fi
+          # A requested name goes when the configuration declares it
+          # and it will not run: an exclusion removed it, or no
+          # instance of it runs at a stage this action reaches.
+          #
+          # A name the configuration never declares is NOT dropped.
+          # It must reach prek, which refuses it loudly; filtering it
+          # out here would turn 'hooks: typo' into a green no-op.
+          #
+          # Compared on exact strings, never by substring. The names
+          # on one side come from the CONFIGURATION and are held to
+          # no allow-list; those on the other have passed one. A
+          # ' id ' containment test over a space-joined string would
+          # match across element boundaries the moment a name held a
+          # space.
+          #
+          # '--no-config' because 'uv run' -- unlike 'uvx' -- reads a
+          # 'uv.toml' from the working directory, which here is the
+          # checkout being linted. That file can redirect the package
+          # index, so the repository under test could otherwise
+          # choose where this action's own tooling comes from.
+          compare_status=0
+          hooks=$(PREK_REQUESTED="$hooks" \
+            uv run --no-config --no-project \
+            --with pyyaml==6.0.2 python - \
+            "$cfg" "$surviving" <<'PYEOF'
+        import json
+        import os
+        import sys
+
+        import yaml
+
+        # Stages at which 'prek run -- <id>' executes a hook.
+        # Measured against prek 0.4.10 with one hook per stage:
+        # 'pre-commit' and 'manual' ran, and the other nine --
+        # commit-msg, post-checkout, post-commit, post-merge,
+        # post-rewrite, pre-merge-commit, pre-push, pre-rebase,
+        # prepare-commit-msg -- printed nothing and exited 0.
+        #
+        # 'manual' belongs here because naming a hook on the command
+        # line falls back to that stage (prek 0.2.20). The run-all
+        # precheck uses a NARROWER set, since an unqualified
+        # 'run --all-files' leaves manual hooks alone.
+        RUNNABLE_STAGES = frozenset({'pre-commit', 'manual'})
+
+
+        def declared_names(path):
+            '''Every id and alias the configuration file declares.'''
+            try:
+                with open(path, encoding='utf-8') as handle:
+                    cfg = yaml.safe_load(handle) or {}
+            except (OSError, ValueError, yaml.YAMLError) as exc:
+                sys.exit(f'could not read the configuration: {exc}')
+            if not isinstance(cfg, dict):
+                sys.exit('configuration is not a YAML mapping')
+            names = set()
+            for repo in cfg.get('repos') or []:
+                if not isinstance(repo, dict):
+                    continue
+                for hook in repo.get('hooks') or []:
+                    if not isinstance(hook, dict):
+                        continue
+                    for key in ('id', 'alias'):
+                        value = hook.get(key)
+                        if value:
+                            names.add(str(value))
+            return names
+
+
+        def surviving_names(path):
+            '''Names still selected AND runnable, according to prek.'''
+            try:
+                with open(path, encoding='utf-8') as handle:
+                    listed = json.load(handle)
+            except (OSError, ValueError) as exc:
+                sys.exit(f'could not read the hook listing: {exc}')
+            if not isinstance(listed, list):
+                sys.exit('the hook listing is not a JSON array')
+            names = set()
+            for entry in listed:
+                if not isinstance(entry, dict) or not entry.get('id'):
+                    sys.exit('the hook listing has an entry with no id')
+                stages = entry.get('stages')
+                # A listing without stages predates the field; treat
+                # the hook as runnable rather than dropping it.
+                if stages is not None:
+                    if not RUNNABLE_STAGES.intersection(stages):
+                        continue
+                # Id AND alias: prek reports them separately, and a
+                # request or an exclusion may name either.
+                for key in ('id', 'alias'):
+                    value = entry.get(key)
+                    if value:
+                        names.add(str(value))
+            return names
+
+
+        declared = declared_names(sys.argv[1])
+        surviving = surviving_names(sys.argv[2])
+        excluded = {name for name in declared if name not in surviving}
+        # 'split()' is exact here: every requested id has passed the
+        # [A-Za-z0-9._-] allow-list, so none contains whitespace.
+        print(
+            ' '.join(
+                name
+                for name in os.environ['PREK_REQUESTED'].split()
+                if name not in excluded
+            )
+        )
+        PYEOF
+          ) || compare_status=$?
+          rm -rf "$listing_dir"
+          if [ "$compare_status" -ne 0 ]; then
+            echo '::error::could not compare the hook listings ❌'
+            echo '::error::Refusing to guess which hooks run.'
+            exit 1
+          fi
           if [ -z "$hooks" ]; then
             run_needed='false'
-            no_work_reason='skip_hooks excluded every selected hook'
+            # Source-neutral. Three things empty this set --
+            # skip_hooks, an ambient SKIP/PREK_SKIP, and a hook whose
+            # every instance sits at an unreachable stage -- and
+            # naming skip_hooks alone misreported the other two.
+            no_work_reason='no selected hook remains to run'
             echo "::notice::$no_work_reason; nothing to do ✅"
           fi
         fi
@@ -544,20 +883,31 @@ runs:
         # nothing. 'prek list' applies the same selectors 'prek run'
         # does, and empty output corresponds exactly to the error
         # above.
-        if [ -n "$INPUT_SKIP_HOOKS" ] && [ "$run_all" = 'true' ]; then
-          read -ra skip_ids <<< "${INPUT_SKIP_HOOKS//,/ }"
+        if [ "${#effective_list[@]}" -gt 0 ] &&
+          [ "$run_all" = 'true' ]; then
           list_args=()
-          for skip_id in "${skip_ids[@]}"; do
+          for skip_id in "${effective_list[@]}"; do
             list_args+=(--skip "$skip_id")
           done
           list_status=0
-          remaining=$(uvx "prek@$INPUT_PREK_VERSION" list \
-            --config "$cfg" \
+          # '--hook-stage pre-commit' to match the run this precheck
+          # speaks for. An unqualified 'prek run --all-files'
+          # executes pre-commit hooks and leaves every other stage
+          # alone -- including 'manual', which the per-hook path DOES
+          # reach by naming it, hence the narrower filter here.
+          #
+          # Without it the listing counted hooks the run would skip:
+          # excluding a pre-commit hook by alias left a pre-push twin
+          # in the listing, the precheck saw work remaining, the run
+          # executed nothing, exited 0, and the summary reported
+          # 'all hooks | ✅'.
+          remaining=$(uvx --no-config "prek@$INPUT_PREK_VERSION" list \
+            --config "$cfg" --hook-stage pre-commit \
             "${list_args[@]+"${list_args[@]}"}") || list_status=$?
           if [ "$list_status" -eq 0 ] && [ -z "$remaining" ]; then
             run_needed='false'
-            no_work_reason='skip_hooks excluded every hook in the'
-            no_work_reason="$no_work_reason configuration"
+            no_work_reason='no hook in the configuration remains to'
+            no_work_reason="$no_work_reason run"
             echo "::notice::$no_work_reason; nothing to do ✅"
           fi
           # A non-zero status is 'could not tell', not 'nothing to
@@ -570,19 +920,35 @@ runs:
           # for hooks_run is 'empty when there was nothing to do',
           # and 'all' here would name work that did not happen --
           # which is what the run-all label would otherwise say once
-          # skip_hooks excluded every hook. The ci.skip no-op path
-          # reaches the same state through an empty $hooks.
+          # the exclusions emptied the configuration. The ci.skip
+          # no-op path reaches the same state through an empty
+          # $hooks.
           hooks_label=''
         elif [ "$run_all" = 'true' ]; then
           hooks_label='all'
         else
           hooks_label="$hooks"
         fi
+        # One selector per line, so an item containing a space
+        # survives the round trip. Neither source may contain a
+        # newline (both are checked), so it is a safe separator.
+        #
+        # An unpredictable delimiter, not a fixed word: a selector is
+        # caller-supplied and a fixed terminator would itself be a
+        # legal one, letting a caller close the record early and have
+        # the remainder parsed as workflow commands.
+        skip_delim="SKIPS_EOF_$(dd if=/dev/urandom bs=15 count=1 \
+          status=none | base64 | tr -d '/+=')"
         config_hash=$(sha256sum "$cfg" | awk '{print $1}')
         {
           echo "config_file=$cfg"
           echo "hooks=$hooks"
           echo "hooks_label=$hooks_label"
+          echo "skip_effective<<$skip_delim"
+          for skip_id in "${effective_list[@]+"${effective_list[@]}"}"; do
+            printf '%s\n' "$skip_id"
+          done
+          echo "$skip_delim"
           echo "run_all=$run_all"
           echo "run_needed=$run_needed"
           echo "no_work_reason=$no_work_reason"
@@ -605,7 +971,7 @@ runs:
       env:
         CONFIG_FILE: ${{ steps.resolve.outputs.config_file }}
         RESOLVED_HOOKS: ${{ steps.resolve.outputs.hooks }}
-        INPUT_SKIP_HOOKS: ${{ inputs.skip_hooks }}
+        SKIP_EFFECTIVE: ${{ steps.resolve.outputs.skip_effective }}
         RUN_ALL: ${{ steps.resolve.outputs.run_all }}
         INPUT_PATH_PREFIX: ${{ inputs.path_prefix }}
         INPUT_BRANCH_NAME: ${{ inputs.branch_name }}
@@ -628,40 +994,70 @@ runs:
         fi
         status=0
         rows=''
-        # '--skip' applies to the run-all path ALONE. In per-hook mode
-        # the resolver has already removed the exclusions from the
-        # list, so the loop never names one.
+        # '--skip' is forwarded on BOTH paths.
         #
-        # Passing it there as well would look like defence in depth
-        # and behave as the opposite. Measured against prek 0.4.14:
+        # An earlier revision passed it on the run-all path alone,
+        # reasoning that the resolver had already removed exclusions
+        # from the per-hook list so the flag was redundant there --
+        # and worse than redundant, because
+        # 'prek run --skip X -- X' exits 1 rather than selecting
+        # nothing, so a filter bug would have become a false failure.
         #
-        #   $ prek run --skip always-fails -- always-fails
-        #   warning: selector `always-fails` did not match any hooks
-        #   error: No hooks found after filtering with the given
-        #   selectors
-        #   exit=1
+        # That reasoning assumed one instance per id. prek allows a
+        # hook id to appear MORE THAN ONCE, and matches a selector
+        # against either the id or an alias:
         #
-        # So should the filter ever fail, the excluded hook records a
-        # cross and fails the run -- a caller punished for an
-        # exclusion they asked for. Without '--skip' the same bug
-        # over-runs the hook instead, which is visible and safe.
+        #   $ prek list --config cfg.yaml
+        #   .:dup
+        #   .:dup
+        #   $ prek run --config cfg.yaml -- dup
+        #   dup A...................................Passed
+        #   dup B...................................Passed
+        #   $ prek run --config cfg.yaml --skip first-one -- dup
+        #   dup B...................................Passed
+        #
+        # So when an alias excludes ONE instance, the id survives in
+        # the resolved list -- correctly, the other instance must
+        # still run -- and a bare 'run -- dup' then re-selects both
+        # and runs the excluded one. Forwarding the exclusions is
+        # what keeps the surviving instance without the excluded one.
+        #
+        # The old objection no longer applies: an id whose EVERY
+        # instance was excluded is absent from the surviving listing,
+        # so the resolver has already dropped it and the loop never
+        # names it.
         #
         # Built as an ARRAY: a single string would either word-split
         # unquoted -- taking pathname expansion with it -- or arrive
         # as one argument when quoted, and prek takes one id per
-        # '--skip'. 'read -ra' splits on IFS without globbing, and
-        # validation has already refused anything outside
-        # [A-Za-z0-9._-] or with a leading '-'.
+        # '--skip'.
+        #
+        # Two grammars share this list, so it is NOT held to one
+        # rule. 'skip_hooks' was gated to [A-Za-z0-9._-] on the way
+        # in; the ambient 'SKIP'/'PREK_SKIP' entries deliberately
+        # were not, because they carry prek SELECTORS -- 'frontend/'
+        # names a project, 'frontend:eslint' a qualified hook, and
+        # 'frontend app/' holds a space. Narrowing them to the
+        # hook-id allow-list would reject workspace callers prek
+        # serves happily. What the resolver refused for them instead
+        # is what cannot be forwarded safely: control characters, and
+        # a leading '-' that would read as an option.
+        #
+        # Quoting carries the rest, which is why each element is read
+        # whole and expanded quoted below.
         skip_args=()
-        if [ -n "$INPUT_SKIP_HOOKS" ]; then
-          read -ra skip_list <<< "${INPUT_SKIP_HOOKS//,/ }"
-          for skip_id in "${skip_list[@]}"; do
+        if [ -n "$SKIP_EFFECTIVE" ]; then
+          # One selector per LINE. Splitting on IFS would break an
+          # item containing a space -- prek splits SKIP/PREK_SKIP on
+          # commas alone, so 'frontend app/' is one selector.
+          while IFS= read -r skip_id; do
+            [ -n "$skip_id" ] || continue
             skip_args+=(--skip "$skip_id")
-          done
-          echo "Skipping hooks: ${skip_list[*]} 💬"
+            echo "Skipping: $skip_id 💬"
+          done <<< "$SKIP_EFFECTIVE"
         fi
         if [ "$RUN_ALL" = 'true' ]; then
-          if uvx "prek@$INPUT_PREK_VERSION" run --all-files \
+          if uvx --no-config "prek@$INPUT_PREK_VERSION" run --all-files \
             --show-diff-on-failure --config "$CONFIG_FILE" \
             "${skip_args[@]+"${skip_args[@]}"}"; then
             rows='| all hooks | ✅ |'
@@ -678,8 +1074,9 @@ runs:
             # 'run --help' exits 0, reporting a pass for a hook that
             # never ran. Validation rejects such ids too; this is the
             # second of the two locks.
-            if uvx "prek@$INPUT_PREK_VERSION" run --all-files \
+            if uvx --no-config "prek@$INPUT_PREK_VERSION" run --all-files \
               --show-diff-on-failure --config "$CONFIG_FILE" \
+              "${skip_args[@]+"${skip_args[@]}"}" \
               -- "$hook"; then
               rows="$rows| $hook | ✅ |"$'\n'
             else
@@ -709,10 +1106,15 @@ runs:
         #
         # The reason travels from the resolver rather than being
         # assumed here. Three paths reach this step now -- an empty
-        # ci.skip, an explicit subset emptied by skip_hooks, and a
-        # configuration whose every hook skip_hooks excluded -- and a
-        # summary naming ci.skip for the other two sends a caller to
-        # look at a key they never used.
+        # ci.skip, an explicit subset left with nothing to run, and a
+        # configuration left with nothing to run -- and a summary
+        # naming ci.skip for the other two sends a caller to look at
+        # a key they never used.
+        #
+        # The last two reasons stay source-neutral: skip_hooks, an
+        # ambient SKIP/PREK_SKIP, and an unreachable hook stage all
+        # empty the set, so naming one input would misreport the
+        # rest.
         {
           echo '## ⛔️ Standalone Linting'
           echo ''

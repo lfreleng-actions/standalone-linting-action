@@ -1,0 +1,68 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Fixture for the hook-stage test in testing.yaml.
+#
+# 'prek list' without '--hook-stage' reports hooks at EVERY stage,
+# while 'prek run' executes only some of them. Measured against prek
+# 0.4.10 with one hook per stage, naming each in turn:
+#
+#   pre-commit           RAN
+#   manual               RAN
+#   commit-msg           exit 0, no output
+#   post-checkout        exit 0, no output
+#   post-commit          exit 0, no output
+#   post-merge           exit 0, no output
+#   post-rewrite         exit 0, no output
+#   pre-merge-commit     exit 0, no output
+#   pre-push             exit 0, no output
+#   pre-rebase           exit 0, no output
+#   prepare-commit-msg   exit 0, no output
+#
+# Nine stages therefore pass silently without running anything, and
+# a resolver comparing the raw listings cannot tell the difference.
+#
+# The two hooks below share an id and differ by stage. Excluding the
+# pre-commit one by its alias leaves the pre-push one listed:
+#
+#   $ prek list --config stage-id-fixture.yaml --skip dup-pre
+#   .:dup
+#
+# so 'dup' looked like a survivor and stayed in the selection. The
+# run then filtered it away by stage:
+#
+#   $ prek run --config stage-id-fixture.yaml --skip dup-pre -- dup
+#   (no output)
+#   exit 0
+#
+# and the action recorded 'dup | ✅' for a hook that never ran --
+# the green check that linted nothing. Comparing what the
+# configuration defines against what survives AND would run keeps
+# the two in step.
+#
+# Not discovered by prek's workspace mode: that looks for prek.toml,
+# .pre-commit-config.yaml and .pre-commit-config.yml, and this is
+# none of them. The test reaches it through config_path.
+
+repos:
+  - repo: local
+    hooks:
+      - id: dup
+        alias: dup-pre
+        name: 'Runnable instance, excluded by alias'
+        entry: 'true'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+
+      # Same id, a stage no run executes. Entry is 'false' so the
+      # test cannot pass by this hook quietly succeeding.
+      - id: dup
+        name: 'Instance a run never reaches'
+        entry: 'false'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]

@@ -1,0 +1,62 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Fixture for the colon-in-hook-id test in testing.yaml.
+#
+# prek's text listing prints '<project>:<hook-id>' and escapes
+# nothing, while placing no restriction on an id -- so an id holding
+# a colon makes the line ambiguous:
+#
+#   $ prek list --config colon-id-fixture.yaml
+#   .:a:b
+#   .:b
+#
+# Splitting at the last colon reads BOTH lines as 'b'. That is right
+# for the ordinary workspace case, where 'frontend:eslint' should
+# yield 'eslint', and wrong here.
+#
+# The two ids below are chosen so the misreading collides. Excluding
+# 'b' leaves 'a:b' listed:
+#
+#   $ prek list --config colon-id-fixture.yaml --skip b
+#   .:a:b
+#
+# which the same split also reads as 'b'. The excluded id therefore
+# appears to have survived, the resolver keeps it in the selection,
+# and prek is then asked to run a hook it was told to skip:
+#
+#   $ prek run --config colon-id-fixture.yaml --skip b -- b
+#   error: No hooks found after filtering with the given selectors
+#   exit 1
+#
+# So the run FAILS for a hook the caller legitimately excluded --
+# the cross this resolver exists to prevent. Reading
+# '--output-format json' avoids the split altogether.
+#
+# Note prek cannot skip 'a:b' by selector at all: '--skip a:b' is
+# read as project 'a', hook 'b', and warns that it matched nothing.
+# An id containing a colon is unreachable, which is prek's business
+# rather than this action's -- the fixture leans on the collision,
+# not on excluding that hook.
+#
+# Not discovered by prek's workspace mode: that looks for prek.toml,
+# .pre-commit-config.yaml and .pre-commit-config.yml, and this is
+# none of them. The test reaches it through config_path.
+
+repos:
+  - repo: local
+    hooks:
+      - id: 'a:b'
+        name: 'Hook whose id contains a colon'
+        entry: 'true'
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: 'b'
+        name: 'Hook whose id is the colon id tail'
+        entry: 'true'
+        language: system
+        pass_filenames: false
+        always_run: true

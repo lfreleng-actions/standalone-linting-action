@@ -1,0 +1,45 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Fixture for the glob-shaped hook id test in testing.yaml.
+#
+# prek places no restriction on the shape of a hook id, and accepts
+# one spelling a shell glob:
+#
+#   $ prek list --config glob-id-fixture.yaml
+#   .:*
+#   .:decoy
+#
+# The action's own inputs are gated to [A-Za-z0-9._-], but ids read
+# back OUT of a configuration are not, so the resolver has to handle
+# this. Iterating that listing unquoted expanded the '*' against the
+# checkout: the real id never reached the comparison, while every
+# matched FILENAME entered the excluded set. A requested hook sharing
+# a name with a file was then dropped unrun and the run reported a
+# green no-op.
+#
+# Not discovered by prek's workspace mode: that looks for prek.toml,
+# .pre-commit-config.yaml and .pre-commit-config.yml, and this is
+# none of them. The test reaches it through config_path.
+
+repos:
+  - repo: local
+    hooks:
+      # The glob. Passes, because the test turns on which ids the
+      # resolver accounts for rather than on this hook's outcome.
+      - id: '*'
+        name: 'Hook whose id is a shell glob'
+        entry: 'true'
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      # Something for skip_hooks to name, so the resolver runs at
+      # all: it engages only when an exclusion is in play.
+      - id: decoy
+        name: 'Decoy hook, excluded by the test'
+        entry: 'true'
+        language: system
+        pass_filenames: false
+        always_run: true

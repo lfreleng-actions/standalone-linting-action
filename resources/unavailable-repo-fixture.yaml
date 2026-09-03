@@ -1,0 +1,56 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Fixture for the unavailable-repository test in testing.yaml.
+#
+# Excluding a hook whose repository cannot be reached is one of the
+# reasons skip_hooks exists, so the exclusion has to spare the action
+# from ever fetching it.
+#
+# 'prek list' initialises hooks, and with no selectors that means
+# cloning every remote repo the configuration names. An unfiltered
+# baseline query therefore failed on the very hook the caller had
+# excluded. Measured against prek 0.4.10:
+#
+#   $ prek list --config unavailable-repo-fixture.yaml
+#   ERROR: Repository not found.
+#   exit 2
+#
+#   $ prek list --config unavailable-repo-fixture.yaml --skip broken
+#   exit 0
+#
+#   $ prek run --all-files --config unavailable-repo-fixture.yaml \
+#       --skip broken -- good
+#   Local good hook....................................Passed
+#   exit 0
+#
+# So prek can run the retained hook perfectly well, and only the
+# baseline query stood in the way. The resolver now takes the
+# declared set from this file and asks prek once, with the selectors
+# applied, so the unreachable repository is never contacted.
+#
+# The URL below is expected to stay unresolvable. Should it ever come
+# into existence, this test would start passing for the wrong reason
+# rather than failing, so the assertion also checks that the good
+# hook alone ran.
+#
+# Not discovered by prek's workspace mode: that looks for prek.toml,
+# .pre-commit-config.yaml and .pre-commit-config.yml, and this is
+# none of them. The test reaches it through config_path.
+
+repos:
+  - repo: local
+    hooks:
+      - id: good
+        name: 'Local good hook'
+        entry: 'true'
+        language: system
+        pass_filenames: false
+        always_run: true
+
+  # yamllint disable-line rule:line-length
+  - repo: https://github.com/lfreleng-actions/deliberately-absent-repository-for-tests
+    rev: v1.0.0
+    hooks:
+      - id: broken

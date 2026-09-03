@@ -64,8 +64,8 @@ Run every hook from a remote configuration, with integrity pinning
 
 | Variable Name | Required | Description                                                           | Default |
 | ------------- | -------- | --------------------------------------------------------------------- | ------- |
-| hooks         | False    | Space/comma separated hook ids to run; empty runs the ci.skip hooks   |         |
-| skip_hooks    | False    | Space/comma separated hook ids to EXCLUDE from whichever set runs     |         |
+| hooks         | False    | Space/comma separated hook ids or aliases to run; empty runs ci.skip  |         |
+| skip_hooks    | False    | Space/comma separated hook ids or aliases to EXCLUDE from the run     |         |
 | run_all_hooks | False    | Run every hook in the configuration (exclusive with hooks)            | false   |
 | config_path   | False    | Configuration path; workspace-relative, or absolute in RUNNER_TEMP    |         |
 | config_url    | False    | HTTPS download URL for the configuration (exclusive with config_path) |         |
@@ -74,7 +74,7 @@ Run every hook from a remote configuration, with integrity pinning
 | branch_name   | False    | Checkout this new Git branch before running linting checks            |         |
 | no_checkout   | False    | Don't perform a checkout of the local repository                      | false   |
 | github_token  | False    | Token exported as GITHUB_TOKEN/GH_TOKEN to hooks needing API access   |         |
-| prek_version  | False    | Version of prek used to run the hooks (X.Y.Z)                         | 0.4.14  |
+| prek_version  | False    | Version of prek used to run the hooks (X.Y.Z, 0.2.20 or newer)        | 0.4.14  |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -85,7 +85,7 @@ Run every hook from a remote configuration, with integrity pinning
 | Output Name | Description                                                             |
 | ----------- | ----------------------------------------------------------------------- |
 | config_file | Resolved path of the linting configuration file                         |
-| hooks_run   | Space-separated hook ids run; 'all' for run_all_hooks; empty when no-op |
+| hooks_run   | Space-separated hook names run; 'all' for run_all_hooks; empty on no-op |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -99,26 +99,58 @@ Mode selection:
 3. Neither (default): run the hooks listed under `ci.skip` in the
    configuration; succeed with a notice when the list is empty
 
-`skip_hooks` is orthogonal to all three: it EXCLUDES ids from
-whichever set the mode above selected, and gives the one way to say
-"run everything except these" — `hooks` names a subset to include,
-which cannot express an exclusion.
+`skip_hooks` is orthogonal to all three: it EXCLUDES hooks from
+whichever set the mode above selected, naming each by id or by
+`alias`, and gives the one way to say "run everything except these" —
+`hooks` names a subset to include, which cannot express an exclusion.
+
+prek matches selectors against a hook's `alias` as readily as its
+`id`, so either name serves in `hooks` as well as in `skip_hooks`.
+`hooks_run` echoes back whichever form the caller used.
 
 It applies by two mechanisms, because the two modes resolve the hook
 set in different places:
 
 <!-- markdownlint-disable MD013 -->
 
-| Mode                          | Who chooses the set | How exclusions apply              |
-| ----------------------------- | ------------------- | --------------------------------- |
-| `run_all_hooks`               | prek                | passed through as `--skip`        |
-| `hooks`, or default `ci.skip` | this action         | subtracted from the resolved list |
+| Mode                          | Who chooses the set | How exclusions apply               |
+| ----------------------------- | ------------------- | ---------------------------------- |
+| `run_all_hooks`               | prek                | passed through as `--skip`         |
+| `hooks`, or default `ci.skip` | this action         | `prek list --skip` picks survivors |
 
 <!-- markdownlint-enable MD013 -->
 
-The distinction matters for `hooks_run`, which reports what actually
-ran rather than what the caller asked for. Excluding every hook is a
+Either way prek resolves the matching, so an exclusion naming a hook's
+**`alias`** behaves the same in every mode. An earlier version
+compared ids inside the action, which left an aliased exclusion
+running in the modes that name hooks while `run_all_hooks` excluded
+it.
+
+An ambient `SKIP` or `PREK_SKIP` is **merged** with this input rather
+than overridden. prek reads those variables in one situation — when no
+CLI `--skip` is present — so passing `skip_hooks` alone would suppress
+them and run a hook the environment had excluded. `PREK_SKIP` takes
+precedence over `SKIP`, matching prek.
+
+A requested hook the configuration does not define is not dropped: it
+reaches prek, which refuses it.
+
+Two conditions remove a hook from the reported set. The first is an
+exclusion prek confirms it applied. The second is **stage**: a run
+reaches `pre-commit` hooks, plus `manual` ones when named, so the
+action drops a hook whose remaining instances sit at `pre-push`,
+`commit-msg` or another stage a run never enters. prek passes over
+such a hook without output at exit 0, and reporting that as a tick
+would claim a check that never ran.
+
+The distinction matters for `hooks_run`, which reports what ran
+rather than what the caller asked for. Excluding every hook is a
 clean no-op in both modes.
+
+Stage pruning applies where the resolver runs, which means where an
+exclusion is in play. With no exclusion set, a hook named directly at
+an unreached stage still counts as run; issue #156 tracks closing
+that gap.
 
 Note that prek treats a `--skip` id matching no hook as a no-op, so a
 stale entry narrows nothing and the run stays green. Unlike `hooks`,

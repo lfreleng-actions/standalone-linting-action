@@ -1,0 +1,40 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Fixture for the unrunnable-hook test in testing.yaml.
+#
+# A configuration whose every hook sits at a stage no run reaches.
+# Excluding that hook is coherent, and must be the same quiet no-op
+# as excluding a runnable one.
+#
+# The trap is in how the exclusion is worked out. Comparing two
+# stage-filtered listings makes this hook absent from BOTH sides, so
+# it never appears excluded, stays in the selection, and prek is
+# handed a contradiction:
+#
+#   $ prek run --config unrunnable-fixture.yaml \
+#       --skip push-only -- push-only
+#   warning: selector `push-only` did not match any hooks
+#   error: No hooks found after filtering with the given selectors
+#   exit 1
+#
+# prek applies selectors before stage inference, so the run fails
+# rather than passing quietly. Comparing what the configuration
+# DEFINES against what survives and would run keeps the hook
+# accounted for.
+#
+# Not discovered by prek's workspace mode: that looks for prek.toml,
+# .pre-commit-config.yaml and .pre-commit-config.yml, and this is
+# none of them. The test reaches it through config_path.
+
+repos:
+  - repo: local
+    hooks:
+      - id: push-only
+        name: 'Hook at a stage no run reaches'
+        entry: 'true'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]

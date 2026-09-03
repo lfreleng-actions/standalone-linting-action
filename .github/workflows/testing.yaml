@@ -99,7 +99,13 @@ jobs:
         with:
           no_checkout: true
           config_path: 'resources/skip-hooks-fixture.yaml'
-          skip_hooks: 'always-fails'
+          # Three failing hook instances to exclude, named by id
+          # ('always-fails'), by ALIAS ('friendly-name' for
+          # 'aliased-failure'), and by the alias of one duplicate
+          # ('twin-bad', leaving 'twin-good' running). prek resolves
+          # all three under run_all_hooks, so this covers alias
+          # matching on that path as well.
+          skip_hooks: 'always-fails, friendly-name, twin-bad'
 
       - name: 'Check the run-all-except case succeeded'
         shell: bash
@@ -144,6 +150,127 @@ jobs:
           fi
           echo 'Excluded hook dropped from the run and the report ✅'
 
+      # Excluding by ALIAS must work in the modes that name hooks, not
+      # just under run_all_hooks. prek's '--skip' matches an alias, so
+      # comparing ids in the action left the hook running while the
+      # run-all path excluded it -- one input, two answers, and the
+      # exclusion silently ignored in the mode that named hooks.
+      #
+      # 'aliased-failure' always fails, so this step cannot pass
+      # unless the alias actually excluded it.
+      # yamllint disable-line rule:line-length
+      - name: "Running local action: ${{ github.repository }} [Skip hooks/by alias]"
+        id: skipped_alias
+        uses: ./
+        with:
+          no_checkout: true
+          config_path: 'resources/skip-hooks-fixture.yaml'
+          hooks: 'always-passes, aliased-failure'
+          skip_hooks: 'friendly-name'
+
+      - name: 'Check the alias exclusion applied'
+        shell: bash
+        env:
+          HOOKS_RUN: ${{ steps.skipped_alias.outputs.hooks_run }}
+        run: |
+          # Check the alias exclusion applied
+          if [ "$HOOKS_RUN" != 'always-passes' ]; then
+            echo 'Error: an alias must exclude its hook ❌'
+            echo "Got: $HOOKS_RUN"
+            exit 1
+          fi
+          echo 'Alias exclusion honoured in per-hook mode ✅'
+
+      # The other direction: naming a hook by its ALIAS in 'hooks'.
+      # prek's selectors match an alias wherever they appear, so a
+      # request may use one as readily as an exclusion. The resolver
+      # has to recognise it on both sides -- reading ids alone from
+      # the surviving listing left the requested alias looking
+      # undeclared, and it was dropped from the reported set while
+      # prek ran it.
+      # yamllint disable-line rule:line-length
+      - name: "Running local action: ${{ github.repository }} [Skip hooks/request by alias]"
+        id: alias_request
+        uses: ./
+        with:
+          no_checkout: true
+          config_path: 'resources/skip-hooks-fixture.yaml'
+          hooks: 'passes-by-alias'
+          skip_hooks: 'always-fails'
+
+      - name: 'Check a hook requested by alias survives'
+        shell: bash
+        env:
+          HOOKS_RUN: ${{ steps.alias_request.outputs.hooks_run }}
+        run: |
+          # Check a hook requested by alias survives
+          if [ "$HOOKS_RUN" != 'passes-by-alias' ]; then
+            echo 'Error: an alias must survive as a request ❌'
+            echo "Got: $HOOKS_RUN"
+            exit 1
+          fi
+          echo 'Alias honoured when naming a hook to run ✅'
+
+      # Excluding a hook whose repository cannot be reached is one of
+      # the reasons skip_hooks exists. 'prek list' initialises hooks,
+      # so an unfiltered baseline query cloned every remote repo the
+      # configuration named -- failing on the very hook the caller
+      # had excluded, while prek itself could run the retained one.
+      # Asking prek once, with the selectors applied, never contacts
+      # the missing repository.
+      # yamllint disable-line rule:line-length
+      - name: "Running local action: ${{ github.repository }} [Skip hooks/unavailable repo]"
+        id: skipped_unavailable
+        uses: ./
+        with:
+          no_checkout: true
+          config_path: 'resources/unavailable-repo-fixture.yaml'
+          hooks: 'good'
+          skip_hooks: 'broken'
+
+      - name: 'Check an unreachable repository stayed unfetched'
+        shell: bash
+        env:
+          HOOKS_RUN: ${{ steps.skipped_unavailable.outputs.hooks_run }}
+        run: |
+          # Check an unreachable repository stayed unfetched
+          # Asserts the good hook ALONE ran, so the case cannot pass
+          # by the absent repository springing into existence.
+          if [ "$HOOKS_RUN" != 'good' ]; then
+            echo 'Error: an excluded repo must not be fetched ❌'
+            echo "Got: $HOOKS_RUN"
+            exit 1
+          fi
+          echo 'Excluded repository never contacted ✅'
+
+      # A DUPLICATE id where only one instance is excluded. The id
+      # must SURVIVE the resolver's filter -- the other instance has
+      # to run -- so the per-hook invocation re-selects both unless
+      # the exclusions are forwarded to it. The excluded twin always
+      # fails, so this step cannot pass otherwise.
+      # yamllint disable-line rule:line-length
+      - name: "Running local action: ${{ github.repository }} [Skip hooks/duplicate id]"
+        id: skipped_twin
+        uses: ./
+        with:
+          no_checkout: true
+          config_path: 'resources/skip-hooks-fixture.yaml'
+          hooks: 'always-passes, twin'
+          skip_hooks: 'twin-bad'
+
+      - name: 'Check the surviving duplicate ran alone'
+        shell: bash
+        env:
+          HOOKS_RUN: ${{ steps.skipped_twin.outputs.hooks_run }}
+        run: |
+          # Check the surviving duplicate ran alone
+          if [ "$HOOKS_RUN" != 'always-passes twin' ]; then
+            echo 'Error: the surviving twin must stay selected ❌'
+            echo "Got: $HOOKS_RUN"
+            exit 1
+          fi
+          echo 'Duplicate id kept, excluded instance skipped ✅'
+
       # Excluding EVERY hook is coherent -- narrowing a shared
       # configuration down to nothing for one project -- and must be a
       # no-op in both modes. prek left to itself disagrees: it exits 1
@@ -156,7 +283,7 @@ jobs:
         with:
           no_checkout: true
           config_path: 'resources/skip-hooks-fixture.yaml'
-          skip_hooks: 'always-passes, always-fails'
+          skip_hooks: 'always-passes, always-fails, friendly-name, twin'
 
       - name: 'Check excluding every hook is a no-op'
         shell: bash
@@ -170,6 +297,279 @@ jobs:
             exit 1
           fi
           echo 'Excluding every hook succeeded quietly ✅'
+
+      # prek reads 'SKIP'/'PREK_SKIP' from the environment, so a
+      # caller migrating from 'SKIP=... pre-commit run' arrives with
+      # the exclusion set there rather than in 'skip_hooks'. prek
+      # honours them only when no CLI '--skip' is present, and this
+      # action always passes '--skip' once 'skip_hooks' is set --
+      # so an ambient value has to be folded into the same list or
+      # it is silently dropped the moment the input is used.
+      #
+      # Here the environment carries the exclusion ALONE. 'always-
+      # fails' is named in 'hooks' and always fails, so this step
+      # cannot pass unless the ambient value reached prek.
+      # yamllint disable-line rule:line-length
+      - name: "Running local action: ${{ github.repository }} [Skip hooks/ambient]"
+        id: skipped_ambient
+        uses: ./
+        env:
+          SKIP: 'always-fails'
+        with:
+          no_checkout: true
+          config_path: 'resources/skip-hooks-fixture.yaml'
+          hooks: 'always-passes, always-fails'
+
+      - name: 'Check the ambient exclusion applied'
+        shell: bash
+        env:
+          HOOKS_RUN: ${{ steps.skipped_ambient.outputs.hooks_run }}
+        run: |
+          # Check the ambient exclusion applied
+          if [ "$HOOKS_RUN" != 'always-passes' ]; then
+            echo 'Error: SKIP must exclude its hook ❌'
+            echo "Got: $HOOKS_RUN"
+            exit 1
+          fi
+          echo 'Ambient SKIP honoured without skip_hooks ✅'
+
+      # Both sources at once. The two must MERGE: taking either one
+      # alone would leave the other's hook running, and both hooks
+      # named here fail. The ambient entry names an ALIAS as well,
+      # which the resolver has to match through prek rather than by
+      # string equality.
+      # yamllint disable-line rule:line-length
+      - name: "Running local action: ${{ github.repository }} [Skip hooks/ambient merge]"
+        id: skipped_merge
+        uses: ./
+        env:
+          SKIP: 'friendly-name'
+        with:
+          no_checkout: true
+          config_path: 'resources/skip-hooks-fixture.yaml'
+          hooks: 'always-passes, always-fails, aliased-failure'
+          skip_hooks: 'always-fails'
+
+      - name: 'Check both exclusion sources merged'
+        shell: bash
+        env:
+          HOOKS_RUN: ${{ steps.skipped_merge.outputs.hooks_run }}
+        run: |
+          # Check both exclusion sources merged
+          if [ "$HOOKS_RUN" != 'always-passes' ]; then
+            echo 'Error: skip_hooks and SKIP must combine ❌'
+            echo "Got: $HOOKS_RUN"
+            exit 1
+          fi
+          echo 'Ambient and input exclusions merged ✅'
+
+      # 'PREK_SKIP' outranks 'SKIP' in prek WHENEVER it exists --
+      # including when it is empty, which disables the exclusion
+      # rather than falling back:
+      #
+      #   $ PREK_SKIP='' SKIP=always-passes prek list --config ...
+      #   .:always-passes                  # nothing skipped
+      #
+      # so the action reads it with an unset-only expansion. A ':-'
+      # default would treat the empty value as absent and apply
+      # 'SKIP', excluding the one hook requested here, emptying the
+      # selection and reporting a green no-op -- which is what this
+      # assertion catches.
+      # yamllint disable-line rule:line-length
+      - name: "Running local action: ${{ github.repository }} [Skip hooks/empty PREK_SKIP]"
+        id: skipped_precedence
+        uses: ./
+        env:
+          PREK_SKIP: ''
+          SKIP: 'always-passes'
+        with:
+          no_checkout: true
+          config_path: 'resources/skip-hooks-fixture.yaml'
+          hooks: 'always-passes'
+
+      - name: 'Check empty PREK_SKIP overrides SKIP'
+        shell: bash
+        env:
+          HOOKS_RUN: ${{ steps.skipped_precedence.outputs.hooks_run }}
+        run: |
+          # Check empty PREK_SKIP overrides SKIP
+          if [ "$HOOKS_RUN" != 'always-passes' ]; then
+            echo 'Error: an empty PREK_SKIP must disable SKIP ❌'
+            echo "Got: $HOOKS_RUN"
+            exit 1
+          fi
+          echo 'Empty PREK_SKIP outranked SKIP ✅'
+
+      # An id holding a COLON makes prek's text listing ambiguous:
+      # it prints '<project>:<hook-id>' and escapes nothing, so
+      # '.:a:b' and '.:b' both read as 'b' when split at the last
+      # colon. Excluding 'b' leaves 'a:b' listed, which reads as 'b'
+      # too -- the excluded id looks like a survivor, stays in the
+      # selection, and prek is then asked to run a hook it was told
+      # to skip:
+      #
+      #   $ prek run --config ... --skip b -- b
+      #   error: No hooks found after filtering
+      #
+      # a CROSS for a hook the caller legitimately excluded. Reading
+      # the listing as JSON keeps the ids whole, so 'b' is correctly
+      # seen as excluded and the run is the quiet no-op below.
+      # yamllint disable-line rule:line-length
+      - name: "Running local action: ${{ github.repository }} [Skip hooks/colon in id]"
+        id: skipped_colon
+        uses: ./
+        with:
+          no_checkout: true
+          config_path: 'resources/colon-id-fixture.yaml'
+          hooks: 'b'
+          skip_hooks: 'b'
+
+      - name: 'Check the colon id did not shadow the exclusion'
+        shell: bash
+        env:
+          HOOKS_RUN: ${{ steps.skipped_colon.outputs.hooks_run }}
+        run: |
+          # Check the colon id did not shadow the exclusion
+          if [ -n "$HOOKS_RUN" ]; then
+            echo 'Error: expected no hooks to run ❌'
+            echo "Got: $HOOKS_RUN"
+            exit 1
+          fi
+          echo 'Colon-bearing id kept distinct from its tail ✅'
+
+      # 'prek list' reports hooks at every stage; 'prek run'
+      # executes only pre-commit and manual ones, and passes
+      # silently over the other nine. Comparing the raw listings let
+      # a duplicate survive its own exclusion: the alias removed the
+      # pre-commit instance, the pre-push instance kept the id in the
+      # listing, and the run then filtered it away -- exit 0, no
+      # output, and a tick recorded for a hook that never ran.
+      #
+      # Weighing the defined hooks against those that survive and
+      # would run makes 'dup' correctly excluded, so the expected
+      # result is the quiet no-op below rather than a green tick.
+      # yamllint disable-line rule:line-length
+      - name: "Running local action: ${{ github.repository }} [Skip hooks/hook stages]"
+        id: skipped_stage
+        uses: ./
+        with:
+          no_checkout: true
+          config_path: 'resources/stage-id-fixture.yaml'
+          hooks: 'dup'
+          skip_hooks: 'dup-pre'
+
+      - name: 'Check an unrunnable stage did not report a pass'
+        shell: bash
+        env:
+          HOOKS_RUN: ${{ steps.skipped_stage.outputs.hooks_run }}
+        run: |
+          # Check an unrunnable stage did not report a pass
+          if [ -n "$HOOKS_RUN" ]; then
+            echo 'Error: reported a hook the run cannot execute ❌'
+            echo "Got: $HOOKS_RUN"
+            exit 1
+          fi
+          echo 'Stage-filtered duplicate excluded, not ticked ✅'
+
+      # Excluding a hook that no run reaches. Comparing two
+      # stage-filtered listings made it absent from both sides, so it
+      # never counted as excluded, stayed in the selection, and prek
+      # met a contradiction -- 'run --skip push-only -- push-only'
+      # exits 1, because selectors apply before stage inference. The
+      # documented no-op for excluding every selected hook has to
+      # hold here too.
+      # yamllint disable-line rule:line-length
+      - name: "Running local action: ${{ github.repository }} [Skip hooks/unrunnable]"
+        id: skipped_unrunnable
+        uses: ./
+        with:
+          no_checkout: true
+          config_path: 'resources/unrunnable-fixture.yaml'
+          hooks: 'push-only'
+          skip_hooks: 'push-only'
+
+      - name: 'Check excluding an unrunnable hook is a no-op'
+        shell: bash
+        env:
+          HOOKS_RUN: ${{ steps.skipped_unrunnable.outputs.hooks_run }}
+        run: |
+          # Check excluding an unrunnable hook is a no-op
+          if [ -n "$HOOKS_RUN" ]; then
+            echo 'Error: expected no hooks to run ❌'
+            echo "Got: $HOOKS_RUN"
+            exit 1
+          fi
+          echo 'Excluding an unrunnable hook succeeded quietly ✅'
+
+      # The same stage blindness in RUN-ALL mode, where the precheck
+      # rather than the resolver decides whether work remains. The
+      # alias excludes the pre-commit twin; the pre-push twin kept
+      # the id in an unfiltered listing, so the precheck saw work,
+      # the run executed nothing and exited 0, and hooks_run claimed
+      # 'all'. Filtering the precheck to the stage an unqualified
+      # 'run --all-files' reaches makes this the quiet no-op below.
+      # yamllint disable-line rule:line-length
+      - name: "Running local action: ${{ github.repository }} [Skip hooks/stages run-all]"
+        id: skipped_stage_all
+        uses: ./
+        with:
+          no_checkout: true
+          config_path: 'resources/stage-id-fixture.yaml'
+          run_all_hooks: true
+          skip_hooks: 'dup-pre'
+
+      - name: 'Check run-all did not claim work it skipped'
+        shell: bash
+        env:
+          HOOKS_RUN: ${{ steps.skipped_stage_all.outputs.hooks_run }}
+        run: |
+          # Check run-all did not claim work it skipped
+          if [ -n "$HOOKS_RUN" ]; then
+            echo 'Error: run-all reported work it did not do ❌'
+            echo "Got: $HOOKS_RUN"
+            exit 1
+          fi
+          echo 'Run-all precheck honoured hook stages ✅'
+
+      # The other side of the same boundary. Rejecting 0.2.19 proves
+      # nothing on its own -- a floor set too HIGH would also reject
+      # it -- so the earliest supported prek has to resolve and run
+      # for real. 0.2.20 is where naming a hook falls back to the
+      # manual stage, and its JSON listing carries the same 'id',
+      # 'alias' and 'stages' fields the resolver reads.
+      # yamllint disable-line rule:line-length
+      - name: "Running local action: ${{ github.repository }} [Skip hooks/floor version]"
+        id: skipped_floor
+        uses: ./
+        with:
+          no_checkout: true
+          config_path: 'resources/skip-hooks-fixture.yaml'
+          hooks: 'always-passes, always-fails'
+          skip_hooks: 'always-fails'
+          prek_version: '0.2.20'
+
+      - name: 'Check the earliest supported prek resolves'
+        shell: bash
+        env:
+          HOOKS_RUN: ${{ steps.skipped_floor.outputs.hooks_run }}
+        run: |
+          # Check the earliest supported prek resolves
+          if [ "$HOOKS_RUN" != 'always-passes' ]; then
+            echo 'Error: the documented floor must work ❌'
+            echo "Got: $HOOKS_RUN"
+            exit 1
+          fi
+          echo 'prek 0.2.20 resolved exclusions correctly ✅'
+
+      # NOT covered behaviourally: a selector containing a space,
+      # such as the workspace project 'frontend app/'. Every case
+      # above reaches the fixture through 'config_path', and
+      # '--config' turns prek's workspace discovery off, so a project
+      # selector matches nothing whichever way the value was split.
+      # Adding a spaced project directory under 'resources/' to make
+      # one bite would put it in the path of this repository's own
+      # prek run. The comma-only split is documented at the code
+      # instead, with the measurement it rests on.
 
       # A configuration named on purpose runs in full, so this covers
       # the run-all path even though the remote file has no ci.skip.
@@ -319,6 +719,68 @@ jobs:
           hooks: '*'
         continue-on-error: true
 
+      # An id the configuration never defines must still reach prek,
+      # which refuses it. Filtering on membership of the SURVIVING
+      # set dropped it instead, emptying the selection and reporting
+      # a successful no-op -- a green check for a hook that never ran
+      # and never could.
+      - name: 'Unknown hook id alongside skip_hooks'
+        id: unknown_hook
+        uses: ./
+        with:
+          no_checkout: true
+          config_path: 'resources/skip-hooks-fixture.yaml'
+          hooks: 'always-passes, no-such-hook'
+          skip_hooks: 'always-fails'
+        continue-on-error: true
+
+      # A hook id read back OUT of a configuration passes through no
+      # allow-list -- prek accepts one spelling a glob. Iterating the
+      # listing unquoted expanded it against the checkout, so the
+      # excluded set filled with FILENAMES (LICENSE, README.md,
+      # action.yaml...) while the real id never reached the
+      # comparison. 'README.md' is undefined in the fixture, so it
+      # must reach prek and be refused; with the expansion in place
+      # it was dropped as though excluded, and the run went green
+      # having linted nothing.
+      - name: 'Glob-shaped hook id in the configuration'
+        id: glob_config
+        uses: ./
+        with:
+          no_checkout: true
+          config_path: 'resources/glob-id-fixture.yaml'
+          hooks: 'README.md'
+          skip_hooks: 'decoy'
+        continue-on-error: true
+
+      # The floor sits at 0.2.20, the newest of the three prek
+      # features the resolver leans on: the JSON listing (0.0.25),
+      # selectors for 'list' (0.2.0), and the manual-stage fallback
+      # for a hook named on the command line (0.2.20). One below the
+      # boundary must be refused, and validation happens before any
+      # prek download, so this case costs nothing.
+      - name: 'prek_version below the floor'
+        id: old_prek
+        uses: ./
+        with:
+          no_checkout: true
+          run_all_hooks: true
+          prek_version: '0.2.19'
+        continue-on-error: true
+
+      # The counter-example that retired a packed-radix comparison.
+      # At radix 100000 this version packs to 200020, exactly what
+      # '0.2.20' packs to, so it passed a floor that every 0.1.x
+      # predates. Comparing the components one at a time refuses it.
+      - name: 'prek_version colliding under a packed radix'
+        id: packed_prek
+        uses: ./
+        with:
+          no_checkout: true
+          run_all_hooks: true
+          prek_version: '0.1.100020'
+        continue-on-error: true
+
       # skip_hooks reaches the same command line as hooks, and
       # '--skip' takes its value as a SEPARATE argument -- so there is
       # no '--' terminator to fall back on and validation is the only
@@ -351,6 +813,10 @@ jobs:
           GLOB_HOOK: ${{ steps.glob_hook.outcome }}
           OPTION_SKIP: ${{ steps.option_skip.outcome }}
           GLOB_SKIP: ${{ steps.glob_skip.outcome }}
+          UNKNOWN_HOOK: ${{ steps.unknown_hook.outcome }}
+          GLOB_CONFIG: ${{ steps.glob_config.outcome }}
+          OLD_PREK: ${{ steps.old_prek.outcome }}
+          PACKED_PREK: ${{ steps.packed_prek.outcome }}
         run: |
           # Error if any rejection case did NOT fail
           status=0
@@ -361,7 +827,11 @@ jobs:
             "hook id that is a prek option:$OPTION_HOOK" \
             "glob as a hook id:$GLOB_HOOK" \
             "option-shaped id in skip_hooks:$OPTION_SKIP" \
-            "glob in skip_hooks:$GLOB_SKIP"; do
+            "glob in skip_hooks:$GLOB_SKIP" \
+            "unknown hook id alongside skip_hooks:$UNKNOWN_HOOK" \
+            "glob-shaped hook id in the config:$GLOB_CONFIG" \
+            "prek_version below the floor:$OLD_PREK" \
+            "prek_version colliding under a radix:$PACKED_PREK"; do
             if [ "${check##*:}" = 'success' ]; then
               echo "Error: ${check%:*} was NOT rejected ❌"
               status=1
