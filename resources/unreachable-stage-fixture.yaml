@@ -1,0 +1,41 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Fixture for the unreachable-stage tests in testing.yaml.
+#
+# A run executes pre-commit hooks, and manual ones when it names
+# them. prek passes over the other nine stages without output and
+# exits 0, so naming a hook at one of them collected a tick without
+# running it -- the green check that linted nothing.
+#
+# 'msg-check' declares 'commit-msg', which is where gitlint lives and
+# so the shape this matters for in practice. Its entry is 'false', so
+# it CANNOT pass: any test that sees a success from naming it has
+# caught the action reporting a result it never obtained.
+#
+# 'ok-hook' declares no stages, which means every stage, so it runs.
+# It is here so a test can name both and prove the check reports the
+# unreachable one rather than refusing any selection containing one.
+#
+# Not discovered by prek's workspace mode: that looks for prek.toml,
+# .pre-commit-config.yaml and .pre-commit-config.yml, and this is
+# none of them. The tests reach it through config_path.
+
+repos:
+  - repo: local
+    hooks:
+      - id: msg-check
+        name: 'Runs at commit-msg, which no run here reaches'
+        entry: 'false'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [commit-msg]
+
+      - id: ok-hook
+        name: 'Declares no stages, so every stage'
+        entry: 'true'
+        language: system
+        pass_filenames: false
+        always_run: true

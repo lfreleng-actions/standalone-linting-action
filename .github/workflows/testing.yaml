@@ -230,6 +230,32 @@ jobs:
           fi
           echo 'Both shapes agree on what ran, and differ in how ✅'
 
+      # The other side of the stage check: a hook declaring no stages
+      # runs, so naming it must still work. Without this the three
+      # rejection cases above could be satisfied by refusing every
+      # selection drawn from that fixture.
+      # yamllint disable-line rule:line-length
+      - name: "Running local action: ${{ github.repository }} [Runnable stage]"
+        id: runnable_stage
+        uses: ./
+        with:
+          no_checkout: true
+          config_path: 'resources/unreachable-stage-fixture.yaml'
+          hooks: 'ok-hook'
+
+      - name: 'Check a runnable hook is still accepted'
+        shell: bash
+        env:
+          HOOKS_RUN: ${{ steps.runnable_stage.outputs.hooks_run }}
+        run: |
+          # Check a runnable hook is still accepted
+          if [ "$HOOKS_RUN" != 'ok-hook' ]; then
+            echo 'Error: a reachable hook must still run ❌'
+            echo "Got: $HOOKS_RUN"
+            exit 1
+          fi
+          echo 'Reachable hook accepted and run ✅'
+
       # Excluding by ALIAS must work in the modes that name hooks, not
       # just under run_all_hooks. prek's '--skip' matches an alias, so
       # comparing ids in the action left the hook running while the
@@ -905,6 +931,120 @@ jobs:
       # '--skip' takes its value as a SEPARATE argument -- so there is
       # no '--' terminator to fall back on and validation is the only
       # lock. A leading '-' must be refused here too.
+      # Both of these reach a line-anchored 'grep', which matches on
+      # any ONE line, so a multi-line value whose first line is valid
+      # slipped past the pattern that follows. Six other string
+      # inputs were already held to the control-character check and
+      # these two were not.
+      - name: 'Multi-line prek_version'
+        id: multiline_prek_version
+        uses: ./
+        with:
+          no_checkout: true
+          run_all_hooks: true
+          # yamllint disable-line rule:line-length
+          prek_version: "0.4.14\njunk"
+        continue-on-error: true
+
+      # A digest carrying a second line builds a second sha256sum
+      # record naming a file nobody asked about. '--strict' refuses
+      # it, so the integrity check already failed closed -- but as
+      # 'FAILED open or read', which says nothing about the input
+      # that was wrong.
+      - name: 'Multi-line config_sha256'
+        id: multiline_sha256
+        uses: ./
+        with:
+          no_checkout: true
+          # yamllint disable-line rule:line-length
+          config_url: 'https://raw.githubusercontent.com/lfreleng-actions/test-python-project/refs/heads/main/resources/pre-commit-config.yaml'
+          # yamllint disable-line rule:line-length
+          config_sha256: "0000000000000000000000000000000000000000000000000000000000000000\n0000000000000000000000000000000000000000000000000000000000000000"
+        continue-on-error: true
+
+      # A hook at a stage no run reaches, named directly. prek exits
+      # 0 having printed nothing, so the action used to record a
+      # tick for it. The fixture's entry is 'false', so a pass here
+      # could only ever mean the hook did not run.
+      #
+      # Both shapes, because neither noticed: the per-hook loop gets
+      # prek's refusal for an UNDEFINED id but not for an unreachable
+      # stage.
+      - name: 'Unreachable stage, single invocation'
+        id: unreachable_single
+        uses: ./
+        with:
+          no_checkout: true
+          config_path: 'resources/unreachable-stage-fixture.yaml'
+          hooks: 'msg-check'
+        continue-on-error: true
+
+      - name: 'Unreachable stage, per-hook runs'
+        id: unreachable_per_hook
+        uses: ./
+        with:
+          no_checkout: true
+          config_path: 'resources/unreachable-stage-fixture.yaml'
+          hooks: 'msg-check'
+          per_hook_runs: true
+        continue-on-error: true
+
+      # Named beside a runnable hook, which is how a real
+      # configuration meets this: the selection must be refused, not
+      # quietly narrowed to the part that works.
+      - name: 'Unreachable stage beside a runnable hook'
+        id: unreachable_pair
+        uses: ./
+        with:
+          no_checkout: true
+          config_path: 'resources/unreachable-stage-fixture.yaml'
+          hooks: 'ok-hook, msg-check'
+        continue-on-error: true
+
+      # The same request with an exclusion that matches nothing in
+      # the configuration. Any exclusion used to engage the resolver,
+      # which counted every name missing from the stage-filtered
+      # listing as excluded -- so a stale skip_hooks entry, or an
+      # ambient SKIP, turned a refused selection back into a green
+      # no-op. Only an exclusion that removed an instance may drop a
+      # name; this one removed nothing.
+      - name: 'Unreachable stage beside a stale exclusion'
+        id: unreachable_stale_skip
+        uses: ./
+        with:
+          no_checkout: true
+          config_path: 'resources/unreachable-stage-fixture.yaml'
+          hooks: 'msg-check'
+          skip_hooks: 'no-such-exclusion'
+        continue-on-error: true
+
+      # And paired with a runnable hook, where the old rule narrowed
+      # the selection to 'ok-hook' and passed.
+      - name: 'Unreachable stage and a runnable hook, stale exclusion'
+        id: unreachable_stale_pair
+        uses: ./
+        with:
+          no_checkout: true
+          config_path: 'resources/unreachable-stage-fixture.yaml'
+          hooks: 'ok-hook, msg-check'
+          skip_hooks: 'no-such-exclusion'
+        continue-on-error: true
+
+      # Two unreachable hooks sharing an id, one excluded by alias.
+      # The survivor is still selected and cannot run, so this is a
+      # refusal -- unlike [Skip hooks/hook stages], where the
+      # excluded twin was the runnable one and a quiet no-op is
+      # right. See resources/unreachable-twin-fixture.yaml.
+      - name: 'Unreachable twin left by an alias exclusion'
+        id: unreachable_twin
+        uses: ./
+        with:
+          no_checkout: true
+          config_path: 'resources/unreachable-twin-fixture.yaml'
+          hooks: 'dup'
+          skip_hooks: 'dup-a'
+        continue-on-error: true
+
       - name: 'Option-shaped id in skip_hooks'
         id: option_skip
         uses: ./
@@ -937,6 +1077,17 @@ jobs:
           UNKNOWN_PER_HOOK: ${{ steps.unknown_hook_per_hook.outcome }}
           UNKNOWN_PAIR: ${{ steps.unknown_hook_pair.outcome }}
           BAD_PER_HOOK: ${{ steps.bad_per_hook.outcome }}
+          # yamllint disable-line rule:line-length
+          MULTILINE_PREK: ${{ steps.multiline_prek_version.outcome }}
+          MULTILINE_SHA: ${{ steps.multiline_sha256.outcome }}
+          UNREACHABLE_ONE: ${{ steps.unreachable_single.outcome }}
+          UNREACHABLE_PER: ${{ steps.unreachable_per_hook.outcome }}
+          UNREACHABLE_PAIR: ${{ steps.unreachable_pair.outcome }}
+          # yamllint disable-line rule:line-length
+          UNREACHABLE_STALE: ${{ steps.unreachable_stale_skip.outcome }}
+          # yamllint disable-line rule:line-length
+          UNREACHABLE_STALE_PAIR: ${{ steps.unreachable_stale_pair.outcome }}
+          UNREACHABLE_TWIN: ${{ steps.unreachable_twin.outcome }}
           GLOB_CONFIG: ${{ steps.glob_config.outcome }}
           OLD_PREK: ${{ steps.old_prek.outcome }}
           PACKED_PREK: ${{ steps.packed_prek.outcome }}
@@ -955,6 +1106,14 @@ jobs:
             "unknown hook id in per-hook mode:$UNKNOWN_PER_HOOK" \
             "unknown hook id beside a valid one:$UNKNOWN_PAIR" \
             "non-boolean per_hook_runs:$BAD_PER_HOOK" \
+            "multi-line prek_version:$MULTILINE_PREK" \
+            "multi-line config_sha256:$MULTILINE_SHA" \
+            "unreachable stage, single:$UNREACHABLE_ONE" \
+            "unreachable stage, per-hook:$UNREACHABLE_PER" \
+            "unreachable stage beside a runnable:$UNREACHABLE_PAIR" \
+            "unreachable stage, stale exclusion:$UNREACHABLE_STALE" \
+            "unreachable pair, stale exclusion:$UNREACHABLE_STALE_PAIR" \
+            "unreachable twin, one excluded:$UNREACHABLE_TWIN" \
             "glob-shaped hook id in the config:$GLOB_CONFIG" \
             "prek_version below the floor:$OLD_PREK" \
             "prek_version colliding under a radix:$PACKED_PREK"; do
@@ -965,3 +1124,49 @@ jobs:
           done
           [ "$status" -eq 0 ] || exit 1
           echo 'All rejection cases failed as expected ✅'
+
+      # Failing is half the contract. hooks_run reports what RAN, and
+      # the preflight refuses these before prek runs anything, so each
+      # must report nothing. For the stale-exclusion and twin cases this
+      # also pins WHERE they failed: the old resolver dropped the
+      # name and the lint step never ran, which reads as an empty
+      # hooks_run too -- but as a success, which the aggregate above
+      # refuses. It used to echo the resolver's label, so
+      # a caller using continue-on-error read 'msg-check' as run.
+      - name: 'Check refused selections report no hooks run'
+        shell: bash
+        env:
+          UNKNOWN_HOOK: ${{ steps.unknown_hook.outputs.hooks_run }}
+          # yamllint disable-line rule:line-length
+          UNKNOWN_PER_HOOK: ${{ steps.unknown_hook_per_hook.outputs.hooks_run }}
+          UNKNOWN_PAIR: ${{ steps.unknown_hook_pair.outputs.hooks_run }}
+          UNREACHABLE_ONE: ${{ steps.unreachable_single.outputs.hooks_run }}
+          # yamllint disable-line rule:line-length
+          UNREACHABLE_PER: ${{ steps.unreachable_per_hook.outputs.hooks_run }}
+          UNREACHABLE_PAIR: ${{ steps.unreachable_pair.outputs.hooks_run }}
+          # yamllint disable-line rule:line-length
+          UNREACHABLE_STALE: ${{ steps.unreachable_stale_skip.outputs.hooks_run }}
+          # yamllint disable-line rule:line-length
+          UNREACHABLE_STALE_PAIR: ${{ steps.unreachable_stale_pair.outputs.hooks_run }}
+          UNREACHABLE_TWIN: ${{ steps.unreachable_twin.outputs.hooks_run }}
+        run: |
+          # Check refused selections report no hooks run
+          status=0
+          for check in \
+            "unknown hook id alongside skip_hooks:$UNKNOWN_HOOK" \
+            "unknown hook id in per-hook mode:$UNKNOWN_PER_HOOK" \
+            "unknown hook id beside a valid one:$UNKNOWN_PAIR" \
+            "unreachable stage, single:$UNREACHABLE_ONE" \
+            "unreachable stage, per-hook:$UNREACHABLE_PER" \
+            "unreachable stage beside a runnable:$UNREACHABLE_PAIR" \
+            "unreachable stage, stale exclusion:$UNREACHABLE_STALE" \
+            "unreachable pair, stale exclusion:$UNREACHABLE_STALE_PAIR" \
+            "unreachable twin, one excluded:$UNREACHABLE_TWIN"; do
+            if [ -n "${check#*:}" ]; then
+              echo "Error: ${check%%:*} reported hooks_run=" \
+                "'${check#*:}' having run nothing ❌"
+              status=1
+            fi
+          done
+          [ "$status" -eq 0 ] || exit 1
+          echo 'Refused selections report no hooks run ✅'

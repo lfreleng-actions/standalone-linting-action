@@ -88,11 +88,11 @@ Run every hook from a remote configuration, with integrity pinning
 
 <!-- markdownlint-disable MD013 -->
 
-| Output Name | Description                                                             |
-| ----------- | ----------------------------------------------------------------------- |
-| config_file | Resolved path of the linting configuration file                         |
-| hooks_run   | Space-separated hook names run; 'all' for run_all_hooks; empty on no-op |
-| prek_runs   | 'prek run' commands issued: 1 combined, one per hook, empty on no-op    |
+| Output Name | Description                                                                        |
+| ----------- | ---------------------------------------------------------------------------------- |
+| config_file | Resolved path of the linting configuration file                                    |
+| hooks_run   | Space-separated hook names run; 'all' for run_all_hooks; empty on no-op or refusal |
+| prek_runs   | 'prek run' commands issued: 1 combined, one per hook, empty on no-op               |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -183,14 +183,28 @@ action drops a hook whose remaining instances sit at `pre-push`,
 such a hook without output at exit 0, and reporting that as a tick
 would claim a check that never ran.
 
+Naming such a hook **fails the run**. Where an exclusion leaves a
+selected hook with no reachable instance the resolver drops it, but a
+hook named directly is a request the action cannot honour, so it says
+so rather than reporting a pass:
+
+<!-- markdownlint-disable MD013 -->
+
+```console
+::error::requested hooks run at no stage this action reaches: msg-check (commit-msg) ❌
+```
+
+<!-- markdownlint-enable MD013 -->
+
+That is the case `gitlint` falls into. Run such hooks in a dedicated
+job until [#143][issue-143] lands.
+
+[issue-143]: https://github.com/lfreleng-actions/standalone-linting-action/issues/143
+
 The distinction matters for `hooks_run`, which reports what ran
 rather than what the caller asked for. Excluding every hook is a
-clean no-op in both modes.
-
-Stage pruning applies where the resolver runs, which means where an
-exclusion is in play. With no exclusion set, a hook named directly at
-an unreached stage still counts as run; issue #156 tracks closing
-that gap.
+clean no-op in both modes, and a refused selection reports nothing,
+because nothing ran.
 
 Note that prek treats a `--skip` id matching no hook as a no-op, so a
 stale entry narrows nothing and the run stays green. Unlike `hooks`,

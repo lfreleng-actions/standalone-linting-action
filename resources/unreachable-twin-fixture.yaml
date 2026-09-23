@@ -1,0 +1,43 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Fixture for the unreachable-twin rejection case in testing.yaml.
+#
+# Two hooks share the id 'dup', both at commit-msg, which no run
+# here reaches. Excluding ONE by alias leaves the other selected and
+# still unable to run. The resolver used to read any removed
+# instance as a removed name, so 'hooks: dup' with
+# 'skip_hooks: dup-a' became a green no-op for a hook that never
+# ran. Both entries are 'false', so a pass could only ever mean
+# nothing executed.
+#
+# Contrast stage-id-fixture.yaml, where the excluded twin is the
+# RUNNABLE one: there a quiet no-op is correct, because the
+# exclusion is why nothing runs. Here it is not, because nothing
+# could ever have run.
+#
+# Not discovered by prek's workspace mode: that looks for
+# prek.toml, .pre-commit-config.yaml and .pre-commit-config.yml, and
+# this is none of them. The test reaches it through config_path.
+
+repos:
+  - repo: local
+    hooks:
+      - id: dup
+        alias: dup-a
+        name: 'First commit-msg twin, excluded by alias'
+        entry: 'false'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [commit-msg]
+
+      - id: dup
+        alias: dup-b
+        name: 'Second commit-msg twin, still selected'
+        entry: 'false'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [commit-msg]

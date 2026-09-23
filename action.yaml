@@ -195,8 +195,9 @@ outputs:
       Space-separated hook names the action ran, echoing whichever
       form the caller asked for -- an id, or an alias where one was
       named; 'all' when run_all_hooks was set; empty when there was
-      nothing to do.
-    value: ${{ steps.resolve.outputs.hooks_label }}
+      nothing to do, and empty when the action refused the selection
+      before running it.
+    value: ${{ steps.lint.outputs.hooks_run }}
 
 runs:
   using: 'composite'
@@ -253,6 +254,23 @@ runs:
         check_clean "$INPUT_CONFIG_URL" 'config_url' || true
         check_clean "$INPUT_PATH_PREFIX" 'path_prefix' || true
         check_clean "$INPUT_BRANCH_NAME" 'branch_name' || true
+        # Both of these are validated by a line-anchored 'grep'
+        # below, so both need this first for the reason given above.
+        #
+        # prek_version reaches three places past that check: the
+        # 'uvx prek@...' argument, the 'IFS=. read' that derives the
+        # version floor -- which takes the FIRST line and so passes
+        # on the valid part -- and the actions/cache key, where a
+        # newline has no business at all.
+        #
+        # config_sha256 fails closed today rather than opening a
+        # hole: 'sha256sum --check --strict' refuses a malformed
+        # record. But it refuses it as 'FAILED open or read' against
+        # a filename built from the second line, which tells a caller
+        # nothing about the input they got wrong. Refusing it here
+        # names the input instead.
+        check_clean "$INPUT_PREK_VERSION" 'prek_version' || true
+        check_clean "$INPUT_CONFIG_SHA256" 'config_sha256' || true
         [ "$errors" -eq 0 ] || exit 1
 
         case "$INPUT_RUN_ALL_HOOKS" in
@@ -765,9 +783,23 @@ runs:
               'nothing.'
             exit 1
           fi
-          # A requested name goes when the configuration declares it
-          # and it will not run: an exclusion removed it, or no
-          # instance of it runs at a stage this action reaches.
+          # A requested name goes when the EXCLUSIONS are why it will
+          # not run: the configuration declares it, nothing runnable
+          # answers to it in the listing, and either every instance
+          # was excluded or an excluded instance was a runnable one.
+          # The last test is what separates an exclusion from stage
+          # alone. A name that never had a runnable instance is KEPT,
+          # whatever else was excluded, and the preflight in the lint
+          # step refuses it. Two false passes came from blurring that:
+          #
+          #   'hooks: msg-check' plus any unrelated exclusion -- a
+          #   stale skip_hooks entry, an ambient SKIP -- became a
+          #   green no-op, and 'ok-hook, msg-check' was narrowed to
+          #   the half that runs
+          #
+          #   two commit-msg hooks sharing an id, one excluded by
+          #   alias, read as a removed name while the other was still
+          #   selected and could never run
           #
           # A name the configuration never declares is NOT dropped.
           # It must reach prek, which refuses it loudly; filtering it
@@ -793,6 +825,7 @@ runs:
         import json
         import os
         import sys
+        from collections import Counter
 
         import yaml
 
@@ -810,8 +843,61 @@ runs:
         RUNNABLE_STAGES = frozenset({'pre-commit', 'manual'})
 
 
-        def declared_names(path):
-            '''Every id and alias the configuration file declares.'''
+        def entry_names(entry):
+            '''The names one hook entry answers to: its id and alias.
+
+            A set, so an alias repeating its own id counts once --
+            the same rule on both sides of the comparison below.
+            '''
+            return {
+                str(entry[key])
+                for key in ('id', 'alias')
+                if entry.get(key)
+            }
+
+
+        # prek's legacy stage names, which it still accepts and maps
+        # onto the current ones (measured against 0.4.14).
+        LEGACY_STAGES = {
+            'commit': 'pre-commit',
+            'push': 'pre-push',
+            'merge-commit': 'pre-merge-commit',
+        }
+
+
+        def config_runnable(repo, hook, default_stages):
+            '''Whether the FILE shows this hook entry reaching a run.
+
+            prek's resolution for a local hook, measured against
+            0.4.14: 'stages' when non-empty, else 'default_stages'
+            when the key is present -- an empty list meaning NO
+            stage -- else every stage. A remote hook without explicit
+            'stages' takes them from a manifest the file does not
+            hold, so it reads as not runnable. That errs toward
+            refusing a selection, never toward a green no-op.
+            '''
+            stages = hook.get('stages')
+            if not (isinstance(stages, list) and stages):
+                if repo.get('repo') != 'local':
+                    return False
+                if default_stages is None:
+                    return True
+                stages = default_stages
+            if not isinstance(stages, list):
+                return False
+            return bool(
+                RUNNABLE_STAGES.intersection(
+                    LEGACY_STAGES.get(stage, stage)
+                    for stage in stages
+                    if isinstance(stage, str)
+                )
+            )
+
+
+        def declared_counts(path):
+            '''Per name: how many hook entries answer to it, and the
+            names with at least one entry the file shows as runnable.
+            '''
             try:
                 with open(path, encoding='utf-8') as handle:
                     cfg = yaml.safe_load(handle) or {}
@@ -819,22 +905,31 @@ runs:
                 sys.exit(f'could not read the configuration: {exc}')
             if not isinstance(cfg, dict):
                 sys.exit('configuration is not a YAML mapping')
-            names = set()
+            default_stages = cfg.get('default_stages')
+            counts = Counter()
+            was_runnable = set()
             for repo in cfg.get('repos') or []:
                 if not isinstance(repo, dict):
                     continue
                 for hook in repo.get('hooks') or []:
                     if not isinstance(hook, dict):
                         continue
-                    for key in ('id', 'alias'):
-                        value = hook.get(key)
-                        if value:
-                            names.add(str(value))
-            return names
+                    names = entry_names(hook)
+                    counts.update(names)
+                    if config_runnable(repo, hook, default_stages):
+                        was_runnable.update(names)
+            return counts, was_runnable
 
 
-        def surviving_names(path):
-            '''Names still selected AND runnable, according to prek.'''
+        def listed(path):
+            '''What prek reports once the exclusions apply.
+
+            Returns how many listed entries answer to each name, at
+            ANY stage, and the set of names with at least one
+            runnable instance. prek lists one entry per configured
+            instance, a duplicate id included, so a count below the
+            declared one means an exclusion removed an instance.
+            '''
             try:
                 with open(path, encoding='utf-8') as handle:
                     listed = json.load(handle)
@@ -842,28 +937,43 @@ runs:
                 sys.exit(f'could not read the hook listing: {exc}')
             if not isinstance(listed, list):
                 sys.exit('the hook listing is not a JSON array')
-            names = set()
+            counts = Counter()
+            runnable = set()
             for entry in listed:
                 if not isinstance(entry, dict) or not entry.get('id'):
                     sys.exit('the hook listing has an entry with no id')
+                # Id AND alias: prek reports them separately, and a
+                # request or an exclusion may name either.
+                names = entry_names(entry)
+                counts.update(names)
                 stages = entry.get('stages')
                 # A listing without stages predates the field; treat
                 # the hook as runnable rather than dropping it.
-                if stages is not None:
-                    if not RUNNABLE_STAGES.intersection(stages):
-                        continue
-                # Id AND alias: prek reports them separately, and a
-                # request or an exclusion may name either.
-                for key in ('id', 'alias'):
-                    value = entry.get(key)
-                    if value:
-                        names.add(str(value))
-            return names
+                if stages is None or RUNNABLE_STAGES.intersection(stages):
+                    runnable.update(names)
+            return counts, runnable
 
 
-        declared = declared_names(sys.argv[1])
-        surviving = surviving_names(sys.argv[2])
-        excluded = {name for name in declared if name not in surviving}
+        declared, was_runnable = declared_counts(sys.argv[1])
+        present, runnable = listed(sys.argv[2])
+        # Nothing runnable left, and the exclusions account for it:
+        # they took every instance, or they took SOME and the file
+        # shows a runnable one among the declared. Requiring an
+        # actual removal in the second arm means a disagreement
+        # between config_runnable and prek -- the file says runnable,
+        # the listing says not, nothing excluded -- keeps the name
+        # for the preflight to refuse, rather than dropping it into
+        # a green no-op.
+        excluded = {
+            name
+            for name in declared
+            if name not in runnable
+            and (
+                present[name] == 0
+                or (present[name] < declared[name]
+                    and name in was_runnable)
+            )
+        }
         # 'split()' is exact here: every requested id has passed the
         # [A-Za-z0-9._-] allow-list, so none contains whitespace.
         print(
@@ -883,10 +993,11 @@ runs:
           fi
           if [ -z "$hooks" ]; then
             run_needed='false'
-            # Source-neutral. Three things empty this set --
-            # skip_hooks, an ambient SKIP/PREK_SKIP, and a hook whose
-            # every instance sits at an unreachable stage -- and
-            # naming skip_hooks alone misreported the other two.
+            # Source-neutral. Two sources feed the exclusions that
+            # empty this set -- skip_hooks and an ambient
+            # SKIP/PREK_SKIP -- and one may do it by removing the
+            # only runnable instance of a name, so naming skip_hooks
+            # alone misreported the rest.
             no_work_reason='no selected hook remains to run'
             echo "::notice::$no_work_reason; nothing to do ✅"
           fi
@@ -1007,6 +1118,7 @@ runs:
       env:
         CONFIG_FILE: ${{ steps.resolve.outputs.config_file }}
         RESOLVED_HOOKS: ${{ steps.resolve.outputs.hooks }}
+        HOOKS_LABEL: ${{ steps.resolve.outputs.hooks_label }}
         SKIP_EFFECTIVE: ${{ steps.resolve.outputs.skip_effective }}
         RUN_ALL: ${{ steps.resolve.outputs.run_all }}
         PER_HOOK_RUNS: ${{ inputs.per_hook_runs }}
@@ -1097,6 +1209,162 @@ runs:
             echo "Skipping: $skip_id 💬"
           done <<< "$SKIP_EFFECTIVE"
         fi
+        # Every hook this run was asked for must be one prek will
+        # actually execute. Two ways it might not be, and prek
+        # reports neither as a failure.
+        #
+        # UNDEFINED. A selector matching nothing is an error when it
+        # is alone and a warning once another matches:
+        #
+        #   $ prek run ... -- no-such-hook
+        #   error: No hooks found after filtering    exit 1
+        #
+        #   $ prek run ... -- always-passes no-such-hook
+        #   warning: selector `no-such-hook` did not match any
+        #   Always passes.......................Passed    exit 0
+        #
+        # UNREACHABLE. A hook exists but declares only stages a run
+        # never enters. Measured with one hook per stage, naming
+        # each: 'pre-commit' and 'manual' ran; the other nine
+        # printed nothing and exited 0. So a commit-msg hook such as
+        # gitlint collects a tick without running, and a hook whose
+        # entry is 'false' -- one that cannot pass -- reports a pass.
+        #
+        # Both are the green check that linted nothing, so both fail
+        # the run here and name what was wrong.
+        #
+        # Runs for BOTH named-hook shapes. The per-hook loop refuses
+        # an undefined id on its own, one selector at a time, but
+        # nothing in either shape notices an unreachable stage.
+        #
+        # Asked HERE rather than in the resolver because 'prek list'
+        # initialises hooks, cloning any remote repository the
+        # exclusions have not removed. The resolver runs before the
+        # cache is restored -- it produces the key that step uses --
+        # so asking there made every selected-hooks run clone
+        # uncached. This step is past the restore.
+        #
+        # Carrying the SAME exclusions as the run, so it sees what
+        # the run sees: aliases, and a hook whose stages come from a
+        # remote manifest, neither of which reading the configuration
+        # would find.
+        if [ "$RUN_ALL" != 'true' ] && [ -n "$RESOLVED_HOOKS" ]; then
+          known_dir=$(mktemp -d "$RUNNER_TEMP/prek-known.XXXXXXXX")
+          known_json="$known_dir/known.json"
+          # To a FILE, matching the resolver: prek's JSON carries
+          # each hook's name, description and stage list, and Linux
+          # caps a single environment string near 128 KiB.
+          if ! uvx --no-config "prek@$INPUT_PREK_VERSION" list \
+            --config "$CONFIG_FILE" --output-format json \
+            "${skip_args[@]+"${skip_args[@]}"}" > "$known_json"; then
+            echo '::error::could not list the hooks this run would' \
+              'execute ❌'
+            echo '::error::Refusing to run a selection this action' \
+              'could not check: an undefined or unreachable hook' \
+              'would then report a pass having run nothing.'
+            exit 1
+          fi
+          check_status=0
+          verdict=$(REQUESTED="$RESOLVED_HOOKS" \
+            uv run --no-config --no-project python - \
+            "$known_json" <<'PYEOF') || check_status=$?
+        import json
+        import os
+        import sys
+
+        # Stages a run reaches when it NAMES a hook. Naming one falls
+        # back to the manual stage (prek 0.2.20), which an unqualified
+        # run-all does not -- but run-all never reaches this check.
+        RUNNABLE_STAGES = frozenset({"pre-commit", "manual"})
+
+        try:
+            with open(sys.argv[1], encoding="utf-8") as handle:
+                listed = json.load(handle)
+        except (OSError, ValueError) as exc:
+            sys.exit(f"could not read the hook listing: {exc}")
+        if not isinstance(listed, list):
+            sys.exit("the hook listing is not a JSON array")
+
+        # A name may reach several hooks: prek permits a duplicate id,
+        # and an alias names one instance of it. Collect the stages of
+        # every instance a name reaches, so one runnable instance is
+        # enough to keep the name.
+        stages_for = {}
+        for entry in listed:
+            if not isinstance(entry, dict) or not entry.get("id"):
+                sys.exit("the hook listing has an entry with no id")
+            stages = entry.get("stages")
+            # Absent means every stage, so the hook is reachable.
+            reachable = (
+                not isinstance(stages, list)
+                or bool(RUNNABLE_STAGES.intersection(stages))
+            )
+            seen = [s for s in (stages or []) if isinstance(s, str)]
+            for key in ("id", "alias"):
+                value = entry.get(key)
+                if value:
+                    name = str(value)
+                    hit = stages_for.setdefault(
+                        name, {"reachable": False, "stages": set()}
+                    )
+                    hit["reachable"] = hit["reachable"] or reachable
+                    hit["stages"].update(seen)
+
+        undefined = []
+        unreachable = []
+        for name in os.environ["REQUESTED"].split():
+            hit = stages_for.get(name)
+            if hit is None:
+                undefined.append(name)
+            elif not hit["reachable"]:
+                stages = "/".join(sorted(hit["stages"])) or "none"
+                unreachable.append(f"{name} ({stages})")
+        print(" ".join(undefined))
+        print(" ".join(unreachable))
+        PYEOF
+          rm -rf "$known_dir"
+          # A failed CHECK is not a bad hook name. Reporting it as
+          # one would name a diagnostic among the caller's hook ids;
+          # reporting nothing would let the run proceed unchecked,
+          # which is what this exists to prevent.
+          if [ "$check_status" -ne 0 ]; then
+            echo '::error::could not check the requested hooks' \
+              'against the configuration ❌'
+            exit 1
+          fi
+          undefined=$(printf '%s' "$verdict" | sed -n '1p')
+          unreachable=$(printf '%s' "$verdict" | sed -n '2p')
+          if [ -n "$undefined" ]; then
+            echo "::error::requested hooks the configuration does" \
+              "not define: $undefined ❌"
+            echo '::error::prek reports an unmatched selector as a' \
+              'warning when another matches, so this run would have' \
+              'passed while linting less than it was asked to.' \
+              'Correct the name, or drop it from the hooks input.'
+            exit 1
+          fi
+          if [ -n "$unreachable" ]; then
+            echo "::error::requested hooks run at no stage this" \
+              "action reaches: $unreachable ❌"
+            echo '::error::A run executes pre-commit hooks, and' \
+              'manual ones when named. prek passes over the rest' \
+              'without output and exits 0, so this run would have' \
+              'reported a pass without executing them. Run such' \
+              'hooks in a dedicated job; see' \
+              'standalone-linting-action#143.'
+            exit 1
+          fi
+        fi
+
+        # Published HERE, past the preflight, rather than straight
+        # from the resolver. hooks_run reports what ran, and every
+        # refusal above exits before prek runs anything -- so a
+        # caller reading it after continue-on-error was told that a
+        # refused hook had run. From this point each named hook is
+        # invoked, so the label holds even when one fails: a failing
+        # hook still ran.
+        echo "hooks_run=$HOOKS_LABEL" >> "$GITHUB_OUTPUT"
+
         if [ "$RUN_ALL" = 'true' ]; then
           if uvx --no-config "prek@$INPUT_PREK_VERSION" run --all-files \
             --show-diff-on-failure --config "$CONFIG_FILE" \
@@ -1119,105 +1387,6 @@ runs:
           # failed -- 'Twin that always fails...Failed' followed by
           # its hook id -- so this trades the table, not the
           # diagnosis. per_hook_runs restores the table.
-
-          # A hook the configuration does not define must fail the
-          # run, and with several selectors prek will not do it.
-          #
-          # Measured against prek 0.4.10:
-          #
-          #   $ prek run ... -- no-such-hook
-          #   error: No hooks found after filtering    exit 1
-          #
-          #   $ prek run ... -- always-passes no-such-hook
-          #   warning: selector `no-such-hook` did not match any
-          #   Always passes.......................Passed    exit 0
-          #
-          # So naming several selectors downgrades an unknown one
-          # from an error to a warning. The per-hook loop got its
-          # refusal free, one selector at a time; collapsing to one
-          # invocation would turn a mistyped hook id into a green
-          # check over a smaller set than the caller asked for.
-          #
-          # Asked HERE rather than in the resolver because 'prek
-          # list' initialises hooks, cloning any remote repository
-          # the exclusions have not removed. The resolver runs before
-          # the cache is restored -- it produces the key the cache
-          # step uses -- so asking there made every selected-hooks
-          # run clone uncached. This step is past the restore.
-          #
-          # Carrying the SAME exclusions as the run below, so it sees
-          # what the run sees: aliases, and a hook whose stages come
-          # from a remote manifest, neither of which reading the
-          # configuration would find.
-          known_dir=$(mktemp -d "$RUNNER_TEMP/prek-known.XXXXXXXX")
-          known_json="$known_dir/known.json"
-          # To a FILE, matching the resolver: prek's JSON carries
-          # each hook's name, description and stage list, and Linux
-          # caps a single environment string near 128 KiB.
-          if ! uvx --no-config "prek@$INPUT_PREK_VERSION" list \
-            --config "$CONFIG_FILE" --output-format json \
-            "${skip_args[@]+"${skip_args[@]}"}" > "$known_json"; then
-            echo '::error::could not list the hooks this run would' \
-              'execute ❌'
-            echo '::error::Refusing to run a selection this action' \
-              'could not check: an undefined hook id would then be' \
-              'a warning rather than a failure, and the run would' \
-              'report a pass having linted less than it was asked' \
-              'to.'
-            exit 1
-          fi
-          check_status=0
-          undefined=$(REQUESTED="$RESOLVED_HOOKS" \
-            uv run --no-config --no-project python - \
-            "$known_json" <<'PYEOF') || check_status=$?
-        import json
-        import os
-        import sys
-
-        try:
-            with open(sys.argv[1], encoding="utf-8") as handle:
-                listed = json.load(handle)
-        except (OSError, ValueError) as exc:
-            sys.exit(f"could not read the hook listing: {exc}")
-        if not isinstance(listed, list):
-            sys.exit("the hook listing is not a JSON array")
-        names = set()
-        for entry in listed:
-            if not isinstance(entry, dict) or not entry.get("id"):
-                sys.exit("the hook listing has an entry with no id")
-            # Id AND alias: a caller may name either, and prek
-            # matches either.
-            for key in ("id", "alias"):
-                value = entry.get(key)
-                if value:
-                    names.add(str(value))
-        print(
-            " ".join(
-                name
-                for name in os.environ["REQUESTED"].split()
-                if name not in names
-            )
-        )
-        PYEOF
-          rm -rf "$known_dir"
-          # A failed CHECK is not an undefined hook. Reporting it as
-          # one would name '<check failed>' among the caller's hook
-          # ids; reporting nothing would let the run proceed
-          # unchecked, which is what this exists to prevent.
-          if [ "$check_status" -ne 0 ]; then
-            echo '::error::could not check the requested hooks' \
-              'against the configuration ❌'
-            exit 1
-          fi
-          if [ -n "$undefined" ]; then
-            echo "::error::requested hooks the configuration does" \
-              "not define: $undefined ❌"
-            echo '::error::prek reports an unmatched selector as a' \
-              'warning when another matches, so this run would have' \
-              'passed while linting less than it was asked to.' \
-              'Correct the name, or drop it from the hooks input.'
-            exit 1
-          fi
 
           read -ra hook_list <<< "$RESOLVED_HOOKS"
           echo "::group::prek run $RESOLVED_HOOKS"
