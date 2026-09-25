@@ -43,7 +43,7 @@ jobs:
       # what a caller with no inputs gets.
       - name: "Running local action: ${{ github.repository }}"
         id: default_mode
-        uses: ./
+        uses: $/
         with:
           # No need to checkout the local repository twice
           no_checkout: true
@@ -56,7 +56,7 @@ jobs:
           HOOKS_RUN: ${{ steps.default_mode.outputs.hooks_run }}
         run: |
           # Check default mode selected the ci.skip hooks
-          if [ "$HOOKS_RUN" != 'gha-workflow-linter' ]; then
+          if [ "$HOOKS_RUN" != 'gha-workflow-linter aislop' ]; then
             echo 'Error: expected the ci.skip hook set ❌'
             echo "Got: $HOOKS_RUN"
             exit 1
@@ -66,7 +66,7 @@ jobs:
       # An explicitly named subset of the local configuration
       - name: "Running local action: ${{ github.repository }} [Subset]"
         id: subset
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           hooks: 'check-yaml, end-of-file-fixer'
@@ -95,7 +95,7 @@ jobs:
       # yamllint disable-line rule:line-length
       - name: "Running local action: ${{ github.repository }} [Skip hooks/run-all]"
         id: skipped
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           config_path: 'resources/skip-hooks-fixture.yaml'
@@ -130,7 +130,7 @@ jobs:
       # yamllint disable-line rule:line-length
       - name: "Running local action: ${{ github.repository }} [Skip hooks/per-hook]"
         id: skipped_subset
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           config_path: 'resources/skip-hooks-fixture.yaml'
@@ -159,7 +159,7 @@ jobs:
       # yamllint disable-line rule:line-length
       - name: "Running local action: ${{ github.repository }} [Single invocation]"
         id: single_run
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           config_path: 'resources/skip-hooks-fixture.yaml'
@@ -191,7 +191,7 @@ jobs:
       # yamllint disable-line rule:line-length
       - name: "Running local action: ${{ github.repository }} [Per-hook runs]"
         id: per_hook_run
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           config_path: 'resources/skip-hooks-fixture.yaml'
@@ -241,7 +241,7 @@ jobs:
       # yamllint disable-line rule:line-length
       - name: "Running local action: ${{ github.repository }} [Skip hooks/by alias]"
         id: skipped_alias
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           config_path: 'resources/skip-hooks-fixture.yaml'
@@ -271,7 +271,7 @@ jobs:
       # yamllint disable-line rule:line-length
       - name: "Running local action: ${{ github.repository }} [Skip hooks/request by alias]"
         id: alias_request
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           config_path: 'resources/skip-hooks-fixture.yaml'
@@ -301,7 +301,7 @@ jobs:
       # yamllint disable-line rule:line-length
       - name: "Running local action: ${{ github.repository }} [Skip hooks/unavailable repo]"
         id: skipped_unavailable
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           config_path: 'resources/unavailable-repo-fixture.yaml'
@@ -331,7 +331,7 @@ jobs:
       # yamllint disable-line rule:line-length
       - name: "Running local action: ${{ github.repository }} [Skip hooks/duplicate id]"
         id: skipped_twin
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           config_path: 'resources/skip-hooks-fixture.yaml'
@@ -359,7 +359,7 @@ jobs:
       # yamllint disable-line rule:line-length
       - name: "Running local action: ${{ github.repository }} [Skip hooks/all excluded]"
         id: skipped_all
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           config_path: 'resources/skip-hooks-fixture.yaml'
@@ -392,7 +392,7 @@ jobs:
       # yamllint disable-line rule:line-length
       - name: "Running local action: ${{ github.repository }} [Skip hooks/ambient]"
         id: skipped_ambient
-        uses: ./
+        uses: $/
         env:
           SKIP: 'always-fails'
         with:
@@ -421,7 +421,7 @@ jobs:
       # yamllint disable-line rule:line-length
       - name: "Running local action: ${{ github.repository }} [Skip hooks/ambient merge]"
         id: skipped_merge
-        uses: ./
+        uses: $/
         env:
           SKIP: 'friendly-name'
         with:
@@ -458,7 +458,7 @@ jobs:
       # yamllint disable-line rule:line-length
       - name: "Running local action: ${{ github.repository }} [Skip hooks/empty PREK_SKIP]"
         id: skipped_precedence
-        uses: ./
+        uses: $/
         env:
           PREK_SKIP: ''
           SKIP: 'always-passes'
@@ -497,7 +497,7 @@ jobs:
       # yamllint disable-line rule:line-length
       - name: "Running local action: ${{ github.repository }} [Skip hooks/colon in id]"
         id: skipped_colon
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           config_path: 'resources/colon-id-fixture.yaml'
@@ -531,7 +531,7 @@ jobs:
       # yamllint disable-line rule:line-length
       - name: "Running local action: ${{ github.repository }} [Skip hooks/hook stages]"
         id: skipped_stage
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           config_path: 'resources/stage-id-fixture.yaml'
@@ -561,7 +561,7 @@ jobs:
       # yamllint disable-line rule:line-length
       - name: "Running local action: ${{ github.repository }} [Skip hooks/unrunnable]"
         id: skipped_unrunnable
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           config_path: 'resources/unrunnable-fixture.yaml'
@@ -591,7 +591,7 @@ jobs:
       # yamllint disable-line rule:line-length
       - name: "Running local action: ${{ github.repository }} [Skip hooks/stages run-all]"
         id: skipped_stage_all
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           config_path: 'resources/stage-id-fixture.yaml'
@@ -620,7 +620,7 @@ jobs:
       # yamllint disable-line rule:line-length
       - name: "Running local action: ${{ github.repository }} [Skip hooks/floor version]"
         id: skipped_floor
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           config_path: 'resources/skip-hooks-fixture.yaml'
@@ -656,7 +656,7 @@ jobs:
       # yamllint disable-line rule:line-length
       - name: "Running local action: ${{ github.repository }} [Config download]"
         id: remote_config
-        uses: ./
+        uses: $/
         with:
           # yamllint disable-line rule:line-length
           config_url: 'https://raw.githubusercontent.com/lfreleng-actions/test-python-project/refs/heads/main/resources/pre-commit-config.yaml'
@@ -703,7 +703,7 @@ jobs:
       # yamllint disable-line rule:line-length
       - name: "Running local action: ${{ github.repository }} [No-op/test-python-project]"
         id: noop
-        uses: ./
+        uses: $/
         with:
           path_prefix: 'test-python-project'
           no_checkout: true
@@ -725,7 +725,7 @@ jobs:
       # yamllint disable-line rule:line-length
       - name: "Running local action: ${{ github.repository }} [Fail/test-python-project]"
         id: failure
-        uses: ./
+        uses: $/
         with:
           path_prefix: 'test-python-project'
           no_checkout: true
@@ -742,7 +742,7 @@ jobs:
 
       # yamllint disable-line rule:line-length
       - name: "Running local action: ${{ github.repository }} [Pass/test-python-project]"
-        uses: ./
+        uses: $/
         with:
           # No need to checkout the local repository twice
           no_checkout: true
@@ -753,7 +753,7 @@ jobs:
       # Rejection cases: each must fail rather than lint anything.
       - name: 'Path traversal in config_path'
         id: traversal
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           config_path: '../.pre-commit-config.yaml'
@@ -761,7 +761,7 @@ jobs:
 
       - name: 'Plaintext http config_url'
         id: insecure_url
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           config_url: 'http://example.org/config.yaml'
@@ -769,7 +769,7 @@ jobs:
 
       - name: 'Mismatched config_sha256'
         id: bad_digest
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           # yamllint disable-line rule:line-length
@@ -783,7 +783,7 @@ jobs:
       # for a hook that never ran.
       - name: 'Hook id that is a prek option'
         id: option_hook
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           hooks: '--help'
@@ -793,7 +793,7 @@ jobs:
       # expanded against the checkout first.
       - name: 'Glob as a hook id'
         id: glob_hook
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           hooks: '*'
@@ -806,7 +806,7 @@ jobs:
       # and never could.
       - name: 'Unknown hook id alongside skip_hooks'
         id: unknown_hook
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           config_path: 'resources/skip-hooks-fixture.yaml'
@@ -819,7 +819,7 @@ jobs:
       # guarantee depends on which shape the caller picked.
       - name: 'Unknown hook id in per-hook mode'
         id: unknown_hook_per_hook
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           config_path: 'resources/skip-hooks-fixture.yaml'
@@ -834,7 +834,7 @@ jobs:
       # prek level and the action has to refuse it itself.
       - name: 'Unknown hook id beside a valid one'
         id: unknown_hook_pair
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           config_path: 'resources/skip-hooks-fixture.yaml'
@@ -846,7 +846,7 @@ jobs:
       # opposite execution shape.
       - name: 'Non-boolean per_hook_runs'
         id: bad_per_hook
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           config_path: 'resources/skip-hooks-fixture.yaml'
@@ -865,7 +865,7 @@ jobs:
       # having linted nothing.
       - name: 'Glob-shaped hook id in the configuration'
         id: glob_config
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           config_path: 'resources/glob-id-fixture.yaml'
@@ -881,7 +881,7 @@ jobs:
       # prek download, so this case costs nothing.
       - name: 'prek_version below the floor'
         id: old_prek
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           run_all_hooks: true
@@ -894,7 +894,7 @@ jobs:
       # predates. Comparing the components one at a time refuses it.
       - name: 'prek_version colliding under a packed radix'
         id: packed_prek
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           run_all_hooks: true
@@ -907,7 +907,7 @@ jobs:
       # lock. A leading '-' must be refused here too.
       - name: 'Option-shaped id in skip_hooks'
         id: option_skip
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           run_all_hooks: true
@@ -916,7 +916,7 @@ jobs:
 
       - name: 'Glob in skip_hooks'
         id: glob_skip
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           run_all_hooks: true
