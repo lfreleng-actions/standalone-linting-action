@@ -949,6 +949,48 @@ jobs:
           rust_components: "rustfmt\nclippy"
         continue-on-error: true
 
+      # The Node.js inputs, likewise, whether or not the project uses
+      # Node.js.
+      - name: 'Unknown node_setup'
+        id: bad_node_setup
+        uses: $/
+        with:
+          no_checkout: true
+          config_path: 'resources/skip-hooks-fixture.yaml'
+          hooks: 'always-passes'
+          node_setup: 'yes'
+        continue-on-error: true
+
+      - name: 'Non-boolean node_install_scripts'
+        id: bad_node_scripts
+        uses: $/
+        with:
+          no_checkout: true
+          config_path: 'resources/skip-hooks-fixture.yaml'
+          hooks: 'always-passes'
+          node_install_scripts: 'yes'
+        continue-on-error: true
+
+      - name: 'Range-shaped node_version'
+        id: range_node_version
+        uses: $/
+        with:
+          no_checkout: true
+          config_path: 'resources/skip-hooks-fixture.yaml'
+          hooks: 'always-passes'
+          node_version: '>=20'
+        continue-on-error: true
+
+      - name: 'Multi-line node_version'
+        id: multiline_node_version
+        uses: $/
+        with:
+          no_checkout: true
+          config_path: 'resources/skip-hooks-fixture.yaml'
+          hooks: 'always-passes'
+          node_version: "22\n20"
+        continue-on-error: true
+
       # A hook id read back OUT of a configuration passes through no
       # allow-list -- prek accepts one spelling a glob. Iterating the
       # listing unquoted expanded it against the checkout, so the
@@ -1204,6 +1246,10 @@ jobs:
           SHELL_RUST_COMPONENTS: ${{ steps.shell_rust_components.outcome }}
           LONG_RUST_COMPONENTS: ${{ steps.long_rust_components.outcome }}
           MULTILINE_RUST: ${{ steps.multiline_rust_components.outcome }}
+          BAD_NODE_SETUP: ${{ steps.bad_node_setup.outcome }}
+          BAD_NODE_SCRIPTS: ${{ steps.bad_node_scripts.outcome }}
+          RANGE_NODE_VERSION: ${{ steps.range_node_version.outcome }}
+          MULTILINE_NODE: ${{ steps.multiline_node_version.outcome }}
           # yamllint disable-line rule:line-length
           MULTILINE_PREK: ${{ steps.multiline_prek_version.outcome }}
           MULTILINE_SHA: ${{ steps.multiline_sha256.outcome }}
@@ -1245,6 +1291,10 @@ jobs:
             "shell-shaped rust_components entry:$SHELL_RUST_COMPONENTS" \
             "over-long rust_components entry:$LONG_RUST_COMPONENTS" \
             "multi-line rust_components:$MULTILINE_RUST" \
+            "unknown node_setup:$BAD_NODE_SETUP" \
+            "non-boolean node_install_scripts:$BAD_NODE_SCRIPTS" \
+            "range-shaped node_version:$RANGE_NODE_VERSION" \
+            "multi-line node_version:$MULTILINE_NODE" \
             "multi-line prek_version:$MULTILINE_PREK" \
             "multi-line config_sha256:$MULTILINE_SHA" \
             "unreachable stage, single:$UNREACHABLE_ONE" \
@@ -2004,3 +2054,554 @@ jobs:
           check 'test-rust-project' "$PROJECT" "stable-$triple"
           [ "$status" -eq 0 ] || exit 1
           echo 'Rust toolchain preparation behaved as expected ✅'
+
+  ### Node.js: real ESLint, Prettier and tsc hooks on generated projects ###
+  # A job of its own: it installs Node.js releases and project
+  # dependencies, which the jobs above have no reason to wait for.
+  node:
+    name: 'Test Node.js project preparation'
+    runs-on: 'ubuntu-24.04'
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          config: '@538904e241556d101fb908b50e2a2965fa0346cf'  # v0.16.6
+
+      # repo.yarnpkg.com serves the Yarn 2+ releases Corepack fetches.
+      # Named here until the organisation allow-list carries it:
+      # https://github.com/lfreleng-actions/.github/pull/268
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed  # v2.22.0
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+            repo.yarnpkg.com:443
+
+      # yamllint disable-line rule:line-length
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The eslint hook the organisation ships to every repository,
+      # with the config and guard script it calls. Its latest release
+      # predates the hook, so a main commit is pinned.
+      - name: 'Checkout actions-template'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: 'lfreleng-actions/actions-template'
+          ref: '967fb2f2a1de1f210873540d17c0c08b32b222aa'  # main, 2026-10-06
+          path: 'actions-template'
+          persist-credentials: false
+
+      # Each fixture carries resources/node-hooks-fixture.yaml as its
+      # .pre-commit-config.yaml, the lint tooling at exact versions,
+      # and a lockfile written by the package manager it belongs to.
+      # Nothing is installed: node_modules is the action's to create.
+      - name: 'Create Node.js fixture projects'
+        shell: bash
+        env:
+          FIXTURE_CONFIG: 'resources/node-hooks-fixture.yaml'
+          TEMPLATE: 'actions-template'
+        run: |
+          # Create Node.js fixture projects
+          set -euo pipefail
+          root="$PWD/node-fixtures"
+          mkdir -p "$root"
+          sources=$(mktemp -d)
+          # Passes the recommended hooks as written: lint-clean,
+          # Prettier-formatted and type-correct.
+          cat > "$sources/clean.ts" << 'TS'
+          /** Returns the sum of two numbers. */
+          export function add(left: number, right: number): number {
+            return left + right;
+          }
+          TS
+          # @typescript-eslint/no-unused-vars, an error in the
+          # recommended set. Prettier and tsc have nothing to say.
+          cat > "$sources/unused.ts" << 'TS'
+          /** Returns the sum of two numbers. */
+          export function add(left: number, right: number): number {
+            const unused = left;
+            return left + right;
+          }
+          TS
+          cat > "$sources/clean.js" << 'JS'
+          /** Returns the sum of two numbers. */
+          export function add(left, right) {
+            return left + right;
+          }
+          JS
+          # no-debugger, an error in @eslint/js recommended, and one
+          # 'eslint --fix' cannot fix.
+          cat > "$sources/debugger.js" << 'JS'
+          /** Returns the sum of two numbers. */
+          export function add(left, right) {
+            debugger;
+            return left + right;
+          }
+          JS
+          cat > "$sources/eslint.config.mjs" << 'JS'
+          import js from "@eslint/js";
+          import { defineConfig } from "eslint/config";
+          import tseslint from "typescript-eslint";
+
+          export default defineConfig(
+            js.configs.recommended,
+            tseslint.configs.recommended,
+          );
+          JS
+          cat > "$sources/tsconfig.json" << 'JSON'
+          {
+            "compilerOptions": {
+              "strict": true,
+              "noEmit": true,
+              "target": "ES2022",
+              "module": "NodeNext",
+              "skipLibCheck": true
+            },
+            "include": ["src"]
+          }
+          JSON
+
+          # The lint tooling the recommended hooks and the
+          # actions-template eslint hook need, at exact versions.
+          # $1=directory $2=packageManager or '' $3=engines.node or ''
+          manifest() {
+            jq -n --arg pm "$2" --arg node "$3" '{
+                name: "lfreleng-ci-node-fixture",
+                version: "0.0.0",
+                private: true,
+                type: "module",
+                devDependencies: {
+                  "@eslint/js": "10.0.1",
+                  "eslint": "10.12.0",
+                  "globals": "17.13.0",
+                  "prettier": "3.9.9",
+                  "typescript": "5.9.3",
+                  "typescript-eslint": "8.71.1"
+                }
+              }
+              + (if $pm == "" then {} else {packageManager: $pm} end)
+              + (if $node == "" then {} else {engines: {node: $node}} end)
+              ' > "$1/package.json"
+          }
+
+          # Each fixture is a git repository of its own, since the
+          # action asks git which files are tracked and prek runs hooks
+          # from the git top level. The lockfile comes from the package
+          # manager it belongs to, fetched through npx rather than the
+          # Corepack and setup-bun paths the action uses, so the action
+          # alone puts each tool on PATH. Nothing is installed here.
+          # $1=fixture name $2=package manager or 'none' (no lockfile)
+          # $3=packageManager or '' $4=engines.node or ''
+          # $5=source for src/index.ts, then any <file>=<content> pairs
+          fixture() {
+            local dir="$root/$1" pair
+            mkdir -p "$dir/src"
+            manifest "$dir" "$3" "$4"
+            cp "$FIXTURE_CONFIG" "$dir/.pre-commit-config.yaml"
+            cp "$sources/eslint.config.mjs" "$sources/tsconfig.json" "$dir/"
+            cp "$sources/$5.ts" "$dir/src/index.ts"
+            for pair in "${@:6}"; do
+              printf '%s\n' "${pair#*=}" > "$dir/${pair%%=*}"
+            done
+            lockfile "$dir" "$2"
+            commit "$dir"
+          }
+
+          # $1=directory $2=package manager or 'none'
+          lockfile() {
+            printf '%s\n' node_modules/ .yarn/ '.pnp.*' > "$1/.gitignore"
+            case "$2" in
+              npm)
+                (cd "$1" && npm install --package-lock-only \
+                  --ignore-scripts --no-audit --no-fund)
+                ;;
+              yarn)
+                # Yarn 1 has no lockfile-only mode: it installs, and the
+                # tree goes. Engines are the action's to check, under
+                # the Node.js the fixture pins.
+                (cd "$1" && npx --yes yarn@1.22.22 install \
+                  --ignore-scripts --ignore-engines --non-interactive)
+                rm -rf "$1/node_modules"
+                ;;
+              yarn-berry)
+                # node_modules, not Plug'n'Play, so 'npx --no-install'
+                # finds the tools.
+                printf 'nodeLinker: node-modules\nenableTelemetry: false\n' \
+                  > "$1/.yarnrc.yml"
+                # An empty yarn.lock marks a project of its own, so
+                # Yarn does not adopt a package.json further up.
+                : > "$1/yarn.lock"
+                # Yarn makes installs immutable under CI=true.
+                (cd "$1" && YARN_ENABLE_IMMUTABLE_INSTALLS=false \
+                  npx --yes -p @yarnpkg/cli-dist@4.18.1 yarn install \
+                  --mode=update-lockfile)
+                ;;
+              pnpm)
+                (cd "$1" && npx --yes pnpm@10.34.6 install \
+                  --lockfile-only --ignore-scripts)
+                ;;
+              bun)
+                (cd "$1" && npx --yes -p bun@1.4.2 bun install \
+                  --lockfile-only)
+                ;;
+              none) ;;
+            esac
+            if [ -e "$1/node_modules" ] || [ -e "$1/.yarn/cache" ]; then
+              echo "Error: generating the lockfile installed into $1 ❌"
+              exit 1
+            fi
+          }
+
+          # $1=directory
+          commit() {
+            git -C "$1" init -q -b main
+            git -C "$1" add -A
+            GIT_AUTHOR_NAME='Fixture Author' \
+            GIT_AUTHOR_EMAIL='author@example.com' \
+            GIT_COMMITTER_NAME='Fixture Committer' \
+            GIT_COMMITTER_EMAIL='committer@example.com' \
+              git -C "$1" -c commit.gpgsign=false commit -q -m 'Seed'
+          }
+
+          # The Node.js version each pins varies, to cover every source:
+          # .nvmrc, .node-version, engines.node, node_version (in the
+          # step), and none (the runner's own).
+          fixture npm npm '' '' clean .nvmrc=22
+          fixture lint-error npm '' '' unused .nvmrc=22
+          fixture no-lockfile none '' '' clean
+          fixture yarn yarn '' '' clean .node-version=24
+          fixture pnpm pnpm 'pnpm@10.34.6' '22' clean
+          fixture yarn-berry yarn-berry 'yarn@4.18.1' '' clean
+          fixture bun bun 'bun@1.4.2' '' clean
+          # A project .npmrc asking for production installs must not
+          # cost the hooks their devDependencies.
+          fixture npm-omit-dev npm '' '' clean .nvmrc=22 \
+            $'.npmrc=omit=dev\nproduction=true'
+
+          # A project in a subdirectory of its repository. prek runs
+          # hooks from the git top level, so they name the project
+          # with 'npx --prefix', and tsc with '-p', as README.md shows.
+          nested="$root/nested"
+          mkdir -p "$nested/web/src"
+          manifest "$nested/web" '' ''
+          cp "$sources/eslint.config.mjs" "$sources/tsconfig.json" \
+            "$nested/web/"
+          cp "$sources/clean.ts" "$nested/web/src/index.ts"
+          echo 22 > "$nested/web/.nvmrc"
+          sed -e '/entry:/s|npx --no-install|npx --prefix web --no-install|' \
+            -e '/entry:/s|tsc --noEmit|tsc --noEmit -p web|' \
+            "$FIXTURE_CONFIG" > "$nested/.pre-commit-config.yaml"
+          if [ "$(grep -c 'entry: npx --prefix web' \
+            "$nested/.pre-commit-config.yaml")" != 3 ]; then
+            echo 'Error: the nested hooks do not all name web ❌'
+            exit 1
+          fi
+          lockfile "$nested/web" npm
+          mv "$nested/web/.gitignore" "$nested/"
+          commit "$nested"
+
+          # No tracked package.json: the action must leave it alone.
+          # The hooks find no file of theirs, and the package.json and
+          # lockfile beside them are untracked, so they do not count.
+          plain="$root/plain"
+          mkdir -p "$plain"
+          cp "$FIXTURE_CONFIG" "$plain/.pre-commit-config.yaml"
+          echo '# Not a Node.js project' > "$plain/README.md"
+          commit "$plain"
+          manifest "$plain" '' ''
+          echo '{}' > "$plain/package-lock.json"
+
+          # The eslint hook exactly as actions-template ships it, with
+          # the config and guard script it calls, on a JavaScript
+          # project: the acceptance case for issue #184.
+          template_config="$sources/template-config.yaml"
+          yq '{"repos": [{"repo": "local", "hooks":
+            [.repos[].hooks[] | select(.id == "eslint")]}],
+            "ci": {"skip": ["eslint"]}}' \
+            "$TEMPLATE/.pre-commit-config.yaml" > "$template_config"
+          if [ "$(yq '.repos[0].hooks | length' "$template_config")" != 1 ]
+          then
+            echo 'Error: actions-template defines no single eslint hook ❌'
+            exit 1
+          fi
+          # $1=fixture name $2=source for src/index.js
+          template() {
+            local dir="$root/$1"
+            mkdir -p "$dir/src" "$dir/.github/hooks"
+            manifest "$dir" '' ''
+            cp "$template_config" "$dir/.pre-commit-config.yaml"
+            cp "$TEMPLATE/eslint.config.mjs" "$dir/"
+            cp "$TEMPLATE/.github/hooks/manifest-guard.sh" \
+              "$dir/.github/hooks/"
+            cp "$sources/$2.js" "$dir/src/index.js"
+            lockfile "$dir" npm
+            commit "$dir"
+          }
+          template template-clean clean
+          template template-error debugger
+          rm -r "$sources"
+          echo "Node.js fixtures created under $root ✅"
+
+      # Must run FIRST, before anything installs node_modules into the
+      # npm fixture: without preparation 'npx --no-install' finds no
+      # ESLint. The same fixture passes once prepared, below, so the
+      # failure is the dependencies' and not the code's.
+      - name: 'Node.js: preparation off'
+        id: node_unprepared
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'node-fixtures/npm'
+          node_setup: false
+        continue-on-error: true
+
+      - name: 'Node.js: npm, version from .nvmrc'
+        id: node_npm
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'node-fixtures/npm'
+
+      - name: 'Node.js: Yarn 1, version from .node-version'
+        id: node_yarn
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'node-fixtures/yarn'
+
+      - name: 'Node.js: pnpm, version from engines.node'
+        id: node_pnpm
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'node-fixtures/pnpm'
+
+      # Node.js 25 and later bundle no Corepack.
+      - name: 'Node.js: pnpm, node_version 26'
+        id: node_pnpm_26
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'node-fixtures/pnpm'
+          node_version: '26'
+
+      - name: 'Node.js: Yarn 2+, node_version 24'
+        id: node_berry
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'node-fixtures/yarn-berry'
+          node_version: '24'
+
+      - name: 'Node.js: Bun, no version pinned'
+        id: node_bun
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'node-fixtures/bun'
+
+      # Prepared dependencies must not mask a real lint failure.
+      - name: 'Node.js: ESLint error'
+        id: node_lint
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'node-fixtures/lint-error'
+          hooks: 'eslint'
+        continue-on-error: true
+
+      # 'auto' installs nothing without a lockfile, so the hooks fail
+      # for want of ESLint; 'true' refuses before running them.
+      - name: 'Node.js: no lockfile, auto'
+        id: node_nolock_auto
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'node-fixtures/no-lockfile'
+        continue-on-error: true
+
+      - name: 'Node.js: no lockfile, true'
+        id: node_nolock_true
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'node-fixtures/no-lockfile'
+          node_setup: true
+        continue-on-error: true
+
+      - name: 'Node.js: .npmrc asking for production installs'
+        id: node_omit_dev
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'node-fixtures/npm-omit-dev'
+
+      # The hooks run from the git top level, the project below it.
+      - name: 'Node.js: project in a subdirectory'
+        id: node_nested
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'node-fixtures/nested/web'
+          config_path: 'node-fixtures/nested/.pre-commit-config.yaml'
+
+      # A runner without jq: the action must not need it. Hidden for
+      # this one case, and restored whatever its outcome.
+      - name: 'Hide jq'
+        shell: bash
+        run: |
+          # Hide jq
+          set -euo pipefail
+          while path=$(command -v jq); do
+            sudo mv "$path" "$path.hidden"
+            echo "$path" >> "$RUNNER_TEMP/hidden-jq"
+            hash -r
+          done
+          echo 'jq is not on PATH ✅'
+
+      - name: 'Node.js: no jq on the runner'
+        id: node_no_jq
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'node-fixtures/pnpm'
+        continue-on-error: true
+
+      - name: 'Restore jq'
+        if: always()
+        shell: bash
+        run: |
+          # Restore jq
+          set -euo pipefail
+          if [ -f "$RUNNER_TEMP/hidden-jq" ]; then
+            while IFS= read -r path; do
+              sudo mv "$path.hidden" "$path"
+            done < "$RUNNER_TEMP/hidden-jq"
+          fi
+
+      - name: 'Node.js: no tracked package.json'
+        id: node_plain
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'node-fixtures/plain'
+
+      # Issue #184's acceptance case: the actions-template eslint hook
+      # passes on a clean project and fails on a lint error.
+      - name: 'Node.js: actions-template eslint hook, clean'
+        id: node_template_clean
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'node-fixtures/template-clean'
+
+      - name: 'Node.js: actions-template eslint hook, lint error'
+        id: node_template_error
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'node-fixtures/template-error'
+        continue-on-error: true
+
+      - name: 'Check Node.js outcomes and prepared projects'
+        shell: bash
+        env:
+          UNPREPARED: ${{ steps.node_unprepared.outcome }}
+          # yamllint disable-line rule:line-length
+          UNPREPARED_PREPARED: ${{ steps.node_unprepared.outputs.node_prepared }}
+          UNPREPARED_HOOKS: ${{ steps.node_unprepared.outputs.hooks_run }}
+          NPM: ${{ steps.node_npm.outputs.node_version }}
+          NPM_PREPARED: ${{ steps.node_npm.outputs.node_prepared }}
+          YARN: ${{ steps.node_yarn.outputs.node_version }}
+          YARN_PREPARED: ${{ steps.node_yarn.outputs.node_prepared }}
+          PNPM: ${{ steps.node_pnpm.outputs.node_version }}
+          PNPM_PREPARED: ${{ steps.node_pnpm.outputs.node_prepared }}
+          PNPM_26: ${{ steps.node_pnpm_26.outputs.node_version }}
+          PNPM_26_PREPARED: ${{ steps.node_pnpm_26.outputs.node_prepared }}
+          BERRY: ${{ steps.node_berry.outputs.node_version }}
+          BERRY_PREPARED: ${{ steps.node_berry.outputs.node_prepared }}
+          BUN: ${{ steps.node_bun.outputs.node_version }}
+          BUN_PREPARED: ${{ steps.node_bun.outputs.node_prepared }}
+          LINT: ${{ steps.node_lint.outcome }}
+          LINT_PREPARED: ${{ steps.node_lint.outputs.node_prepared }}
+          LINT_HOOKS: ${{ steps.node_lint.outputs.hooks_run }}
+          NOLOCK_AUTO: ${{ steps.node_nolock_auto.outcome }}
+          # yamllint disable-line rule:line-length
+          NOLOCK_AUTO_PREPARED: ${{ steps.node_nolock_auto.outputs.node_prepared }}
+          NOLOCK_AUTO_HOOKS: ${{ steps.node_nolock_auto.outputs.hooks_run }}
+          NOLOCK_TRUE: ${{ steps.node_nolock_true.outcome }}
+          NOLOCK_TRUE_HOOKS: ${{ steps.node_nolock_true.outputs.hooks_run }}
+          PLAIN: ${{ steps.node_plain.outcome }}
+          PLAIN_VERSION: ${{ steps.node_plain.outputs.node_version }}
+          PLAIN_PREPARED: ${{ steps.node_plain.outputs.node_prepared }}
+          PLAIN_HOOKS: ${{ steps.node_plain.outputs.hooks_run }}
+          # yamllint disable-line rule:line-length
+          TEMPLATE_PREPARED: ${{ steps.node_template_clean.outputs.node_prepared }}
+          OMIT_DEV_PREPARED: ${{ steps.node_omit_dev.outputs.node_prepared }}
+          NESTED: ${{ steps.node_nested.outputs.node_version }}
+          NESTED_PREPARED: ${{ steps.node_nested.outputs.node_prepared }}
+          NO_JQ: ${{ steps.node_no_jq.outcome }}
+          NO_JQ_VERSION: ${{ steps.node_no_jq.outputs.node_version }}
+          NO_JQ_PREPARED: ${{ steps.node_no_jq.outputs.node_prepared }}
+          TEMPLATE_ERROR: ${{ steps.node_template_error.outcome }}
+          # yamllint disable-line rule:line-length
+          TEMPLATE_ERROR_HOOKS: ${{ steps.node_template_error.outputs.hooks_run }}
+        run: |
+          # Check Node.js outcomes and prepared projects
+          status=0
+          check() {
+            # $1=description $2=got $3=expected, a glob
+            # shellcheck disable=SC2053 # $3 is a glob on purpose
+            if [[ "$2" == $3 ]]; then
+              echo "$1: '$2' ✅"
+            else
+              echo "Error: $1: got '$2', expected '$3' ❌"
+              status=1
+            fi
+          }
+          check 'unprepared run outcome' "$UNPREPARED" 'failure'
+          check 'unprepared run prepared' "$UNPREPARED_PREPARED" 'false'
+          check 'unprepared run hooks' "$UNPREPARED_HOOKS" '?*'
+          check 'npm version' "$NPM" 'v22.*'
+          check 'npm prepared' "$NPM_PREPARED" 'true'
+          check 'Yarn 1 version' "$YARN" 'v24.*'
+          check 'Yarn 1 prepared' "$YARN_PREPARED" 'true'
+          check 'pnpm version' "$PNPM" 'v22.*'
+          check 'pnpm prepared' "$PNPM_PREPARED" 'true'
+          check 'pnpm on Node.js 26 version' "$PNPM_26" 'v26.*'
+          check 'pnpm on Node.js 26 prepared' "$PNPM_26_PREPARED" 'true'
+          check 'Yarn 2+ version' "$BERRY" 'v24.*'
+          check 'Yarn 2+ prepared' "$BERRY_PREPARED" 'true'
+          check 'Bun version' "$BUN" 'v*'
+          check 'Bun prepared' "$BUN_PREPARED" 'true'
+          check 'lint error outcome' "$LINT" 'failure'
+          check 'lint error prepared' "$LINT_PREPARED" 'true'
+          check 'lint error hooks' "$LINT_HOOKS" 'eslint'
+          check 'no lockfile, auto, outcome' "$NOLOCK_AUTO" 'failure'
+          check 'no lockfile, auto, prepared' "$NOLOCK_AUTO_PREPARED" 'false'
+          check 'no lockfile, auto, hooks' "$NOLOCK_AUTO_HOOKS" '?*'
+          check 'no lockfile, true, outcome' "$NOLOCK_TRUE" 'failure'
+          check 'no lockfile, true, hooks' "$NOLOCK_TRUE_HOOKS" ''
+          check 'no package.json outcome' "$PLAIN" 'success'
+          check 'no package.json version' "$PLAIN_VERSION" ''
+          check 'no package.json prepared' "$PLAIN_PREPARED" 'false'
+          check 'no package.json hooks' "$PLAIN_HOOKS" '?*'
+          check 'template eslint, clean' "$TEMPLATE_PREPARED" 'true'
+          check '.npmrc omit=dev prepared' "$OMIT_DEV_PREPARED" 'true'
+          check 'nested project version' "$NESTED" 'v22.*'
+          check 'nested project prepared' "$NESTED_PREPARED" 'true'
+          check 'no jq outcome' "$NO_JQ" 'success'
+          check 'no jq version, from engines.node' "$NO_JQ_VERSION" 'v22.*'
+          check 'no jq prepared' "$NO_JQ_PREPARED" 'true'
+          check 'template eslint, error' "$TEMPLATE_ERROR" 'failure'
+          check 'template eslint, error hooks' "$TEMPLATE_ERROR_HOOKS" '?*'
+          [ "$status" -eq 0 ] || exit 1
+          echo 'Node.js project preparation behaved as expected ✅'

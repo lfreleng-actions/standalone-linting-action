@@ -32,6 +32,12 @@
 # system' hooks calling 'cargo fmt' or 'cargo clippy' find them.
 # rust_toolchain_setup turns that off, or on for any project.
 #
+# Node.js projects (a tracked package.json in path_prefix): before the
+# hooks run, the action selects the Node.js version the project pins
+# and installs its dependencies, frozen to its lockfile, so 'language:
+# system' hooks calling 'npx --no-install eslint' find them.
+# node_setup turns that off, or on for any project.
+#
 # Security posture:
 #   * No secrets required; an optional github_token is only exported
 #     to hooks that need authenticated API access.
@@ -50,6 +56,9 @@
 #     directory (never overwriting repository files, and never a
 #     predictable path a symlink could redirect), is size- and
 #     time-capped, and supports sha256 integrity pinning.
+#   * Node.js dependencies install frozen to the project's tracked
+#     lockfile, with install scripts off unless node_install_scripts
+#     is 'true'. Without a lockfile nothing is installed.
 #   * uvx runs with '--no-config'. Measured against uv 0.11.21,
 #     'uv tool run' does NOT discover a working-directory uv.toml or
 #     '[tool.uv]' the way 'uv run' does -- so a fork-committed one
@@ -229,6 +238,39 @@ inputs:
       Empty installs a missing toolchain without adding components.
     required: false
     default: 'rustfmt clippy'
+  node_setup:
+    description: >-
+      Prepare a Node.js project before the hooks run: 'auto' when
+      path_prefix holds a tracked package.json, 'true' for any
+      project, 'false' never. Preparation selects Node.js (see
+      node_version) and installs the dependencies in path_prefix with
+      the package manager its tracked lockfile belongs to, frozen to
+      that lockfile: npm ci; Yarn 1 --frozen-lockfile; Yarn 2+
+      --immutable and pnpm --frozen-lockfile through Corepack; Bun
+      --frozen-lockfile, after oven-sh/setup-bun. With a package.json
+      but no lockfile to follow, 'auto' installs nothing, with a
+      warning, and 'true' fails. 'true' with no package.json selects
+      Node.js alone.
+    required: false
+    default: 'auto'
+  node_version:
+    description: >-
+      Node.js version for actions/setup-node: 22, 22.11, 22.11.0,
+      22.x, lts/*, lts/<codename>, node, latest or current. Empty
+      takes it from path_prefix: .nvmrc, else .node-version, else
+      package.json engines.node when that is a plain version rather
+      than a range. With none of those, the runner's Node.js runs.
+    required: false
+    default: ''
+  node_install_scripts:
+    description: >-
+      Set 'true' to let the package manager run install scripts, the
+      project's own and its dependencies'. The default 'false'
+      installs with --ignore-scripts (Yarn 2: --skip-builds; Yarn 3+:
+      --mode=skip-build), so installing runs no code from the
+      dependency tree.
+    required: false
+    default: 'false'
 
 outputs:
   prek_runs:
@@ -262,6 +304,21 @@ outputs:
       'false'; 'auto' with no tracked Cargo.toml or no rustup; every
       selected toolchain path-based or linked; or no hook to run.
     value: ${{ steps.rust.outputs.toolchains }}
+  node_version:
+    description: >-
+      The Node.js version the hooks run with, as 'node --version'
+      reports it (v22.11.0). Empty when the action did not prepare
+      Node.js: node_setup 'false'; 'auto' with no tracked
+      package.json; no Node.js on the runner; or no hook to run.
+    value: ${{ steps.node.outputs.version }}
+  node_prepared:
+    description: >-
+      'true' when the action prepared the Node.js project for its
+      hooks: Node.js selected, and the dependencies installed from
+      the lockfile, or no package.json to install from under
+      node_setup 'true'. 'false' otherwise, including 'auto' with no
+      lockfile to follow.
+    value: ${{ steps.node.outputs.prepared || 'false' }}
 
 runs:
   using: 'composite'
@@ -295,6 +352,9 @@ runs:
         INPUT_COMMIT_RANGE: ${{ inputs.commit_range }}
         INPUT_RUST_TOOLCHAIN_SETUP: ${{ inputs.rust_toolchain_setup }}
         INPUT_RUST_COMPONENTS: ${{ inputs.rust_components }}
+        INPUT_NODE_SETUP: ${{ inputs.node_setup }}
+        INPUT_NODE_VERSION: ${{ inputs.node_version }}
+        INPUT_NODE_INSTALL_SCRIPTS: ${{ inputs.node_install_scripts }}
       run: |
         # Validate inputs
         set -euo pipefail
@@ -329,6 +389,7 @@ runs:
         check_clean "$INPUT_BRANCH_NAME" 'branch_name' || true
         check_clean "$INPUT_COMMIT_RANGE" 'commit_range' || true
         check_clean "$INPUT_RUST_COMPONENTS" 'rust_components' || true
+        check_clean "$INPUT_NODE_VERSION" 'node_version' || true
         # Both of these are validated by a line-anchored 'grep'
         # below, so both need this first for the reason given above.
         #
@@ -379,6 +440,29 @@ runs:
               break
             fi
           done
+        fi
+        case "$INPUT_NODE_SETUP" in
+          auto|true|false) ;;
+          *) err "node_setup must be 'auto', 'true' or 'false'" ;;
+        esac
+        case "$INPUT_NODE_INSTALL_SCRIPTS" in
+          true|false) ;;
+          *) err "node_install_scripts must be 'true' or 'false'" ;;
+        esac
+        # node_version reaches actions/setup-node as an input, never a
+        # shell. Held to plain versions and setup-node's aliases: a
+        # range would select whatever release is newest. The plan step
+        # holds a version read from the project to the same rule.
+        # Checked whether or not the project turns out to use Node.js.
+        # A wildcard ends the version: '22.x.1' would read as a range
+        # over all of 22, whatever patch it appears to name.
+        node_rule='^(v?[0-9]{1,4}((\.[0-9]{1,6}){0,2}|(\.[0-9]{1,6})?\.x)'
+        node_rule="$node_rule|lts/(\*|[A-Za-z]{1,32})|node|latest|current)\$"
+        if [ -n "$INPUT_NODE_VERSION" ] &&
+          ! [[ "$INPUT_NODE_VERSION" =~ $node_rule ]]; then
+          node_forms='22, 22.11.0 or 22.x, or lts/*, lts/<codename>,'
+          node_forms="$node_forms node, latest or current"
+          err "node_version must be a version such as $node_forms"
         fi
         if [ "$INPUT_RUN_ALL_HOOKS" = 'true' ] && [ -n "$INPUT_HOOKS" ]
         then
@@ -1478,6 +1562,507 @@ runs:
         else
           summary "✅ Prepared ${#prepared[@]} toolchain(s)"
         fi
+
+    - name: 'Plan Node.js project preparation'
+      # Located by this id in tests/test-node-project.sh, which runs
+      # the step on its own against stand-in projects.
+      id: node_plan
+      if: steps.resolve.outputs.run_needed == 'true'
+      shell: bash
+      env:
+        INPUT_PATH_PREFIX: ${{ inputs.path_prefix }}
+        INPUT_NODE_SETUP: ${{ inputs.node_setup }}
+        INPUT_NODE_VERSION: ${{ inputs.node_version }}
+      run: |
+        # Plan Node.js project preparation
+        #
+        # pre-commit.ci installs no project dependencies, so ESLint
+        # with flat-config plugins, Prettier and tsc reach CI here, as
+        # 'language: system' hooks running the project's own copies
+        # through 'npx --no-install'. Those need the project's
+        # node_modules, installed by the package manager its lockfile
+        # belongs to, under the Node.js version it pins.
+        #
+        # This step decides what to prepare and touches nothing. The
+        # setup actions below act on its outputs, and the 'node' step
+        # installs. Every output is a fixed word or a value held to an
+        # allow-list here: they reach GITHUB_OUTPUT records and action
+        # inputs.
+        set -euo pipefail
+        if [ "$INPUT_NODE_SETUP" = 'false' ]; then
+          echo 'node_setup is false; not preparing Node.js 💬'
+          echo 'setup=false' >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        prefix=$(cd -- "$GITHUB_WORKSPACE/$INPUT_PATH_PREFIX" && pwd -P)
+
+        # What git holds is what prek lints, so a file counts when git
+        # tracks it: an untracked package.json or lockfile, left by an
+        # earlier step, must not make or steer a Node.js project.
+        # Outside a git work tree a file counts when present, but only
+        # under 'true': 'auto' asks git, and there is no answer there.
+        in_git='false'
+        if [ "$(git -C "$prefix" rev-parse --is-inside-work-tree \
+          2> /dev/null)" = 'true' ]; then
+          in_git='true'
+        fi
+        tracked() {
+          # $1=file name in path_prefix
+          [ -f "$prefix/$1" ] || return 1
+          if [ "$in_git" != 'true' ]; then
+            [ "$INPUT_NODE_SETUP" = 'true' ]
+            return
+          fi
+          git -C "$prefix" ls-files --error-unmatch -- ":(literal)$1" \
+            > /dev/null 2>&1
+        }
+
+        manifest='false'
+        if tracked package.json; then
+          manifest='true'
+        fi
+        if [ "$INPUT_NODE_SETUP" = 'auto' ] && [ "$manifest" != 'true' ]
+        then
+          echo 'No tracked package.json in path_prefix; not preparing' \
+            'Node.js 💬'
+          echo 'setup=false' >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        fail() {
+          echo "::error::$* ❌"
+          {
+            echo '## 📦 Node.js Project'
+            echo ''
+            echo "❌ Failed at plan: $*"
+            echo ''
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+        }
+        # The project cannot be installed as it stands. 'auto' warns
+        # and lets the hooks run without node_modules, so a repository
+        # carrying a package.json for some other purpose keeps working;
+        # 'true' asked for preparation and fails without it.
+        skip_reason=''
+        no_install() {
+          if [ "$INPUT_NODE_SETUP" = 'true' ]; then
+            fail "node_setup is 'true' but $*"
+          fi
+          skip_reason="$*"
+          echo "::warning::Not installing dependencies: $*"
+        }
+
+        # Only plain versions and setup-node's aliases, as the validate
+        # step allows for node_version: a range picks whatever release
+        # is newest, which is not what a project pinning a version
+        # means.
+        version_rule='^(v?[0-9]{1,4}((\.[0-9]{1,6}){0,2}'
+        version_rule="$version_rule|(\.[0-9]{1,6})?\.x)"
+        version_rule="$version_rule|lts/(\*|[A-Za-z]{1,32})|node|latest"
+        version_rule="$version_rule|current)\$"
+        version=''
+        version_source=''
+        if [ -n "$INPUT_NODE_VERSION" ]; then
+          # Validated in the validate step.
+          version="$INPUT_NODE_VERSION"
+          version_source='node_version'
+        else
+          for file in .nvmrc .node-version; do
+            tracked "$file" || continue
+            # The first line holding anything but a comment, trimmed.
+            line=$(awk '{ sub(/#.*/, "")
+              gsub(/^[[:space:]]+|[[:space:]]+$/, "") }
+              length { print; exit }' "$prefix/$file") || line=''
+            [ -n "$line" ] || continue
+            # Never echoed: it comes from the repository.
+            if ! [[ "$line" =~ $version_rule ]]; then
+              fail "$file names a Node.js version this action does not" \
+                'accept; use a version such as 22 or 22.11.0, lts/*,' \
+                'or set node_version'
+            fi
+            version="$line"
+            version_source="$file"
+            break
+          done
+        fi
+
+        package_manager=''
+        if [ "$manifest" = 'true' ]; then
+          # Read with the Python the action already runs through uv,
+          # so a runner needs no jq. Prints engines.node, then
+          # packageManager: each empty unless a one-line string. Exits
+          # 3 for anything but a JSON object. '--no-config': see the
+          # resolve step.
+          read_status=0
+          fields=$(uv run --no-config --no-project python - \
+            "$prefix/package.json" <<'PYEOF'
+        import json
+        import sys
+
+        try:
+            with open(sys.argv[1], encoding='utf-8') as handle:
+                data = json.load(handle)
+        except (OSError, ValueError):
+            sys.exit(3)
+        if not isinstance(data, dict):
+            sys.exit(3)
+        engines = data.get('engines')
+        node = engines.get('node') if isinstance(engines, dict) else None
+        for value in (node, data.get('packageManager')):
+            one_line = isinstance(value, str) and not set(value) & {'\n', '\r'}
+            print(value if one_line else '')
+        PYEOF
+          ) || read_status=$?
+          if [ "$read_status" -eq 3 ]; then
+            fail 'package.json in path_prefix is not a JSON object'
+          elif [ "$read_status" -ne 0 ]; then
+            fail 'reading package.json with uv failed'
+          fi
+          engines=$(sed -n 1p <<< "$fields")
+          package_manager=$(sed -n 2p <<< "$fields")
+          if [ -z "$version" ]; then
+            if [[ "$engines" =~ ^v?[0-9]{1,4}(\.[0-9]{1,6}){0,2}$ ]]; then
+              version="$engines"
+              version_source='package.json engines.node'
+            elif [ -n "$engines" ]; then
+              echo '::notice::package.json engines.node is a range, not' \
+                "a version, so the runner's Node.js runs; pin one in" \
+                '.nvmrc or node_version'
+            fi
+          fi
+        fi
+        # Passed on without a leading 'v', in the form setup-node's
+        # examples use.
+        version="${version#v}"
+
+        # The package manager follows the tracked lockfile. A
+        # packageManager field ('pnpm@9.15.0', optionally '+<hash>')
+        # picks between several, and supplies the version Corepack and
+        # setup-bun install.
+        manager=''
+        manager_version=''
+        lockfile=''
+        if [ "$manifest" = 'true' ]; then
+          named=''
+          if [ -n "$package_manager" ]; then
+            pm_rule='^(npm|yarn|pnpm|bun)@([0-9]{1,6})'
+            pm_rule="$pm_rule\.[0-9]{1,6}\.[0-9]{1,6}(-[0-9A-Za-z.]{1,64})?"
+            # bash refuses a repetition bound above 255; the longest
+            # hash Corepack takes, sha512, is 128 hex digits.
+            pm_rule="$pm_rule(\+[0-9A-Za-z]{1,16}\.[0-9A-Fa-f]{1,128})?\$"
+            if [[ "$package_manager" =~ $pm_rule ]]; then
+              named="${BASH_REMATCH[1]}"
+              manager_version="${package_manager#*@}"
+              manager_version="${manager_version%%+*}"
+              named_major="${BASH_REMATCH[2]}"
+            else
+              no_install 'package.json packageManager is not' \
+                '<npm|yarn|pnpm|bun>@<x.y.z>'
+            fi
+          fi
+          if [ -z "$skip_reason" ]; then
+            found=()
+            found_files=()
+            # npm-shrinkwrap.json first: 'npm ci' follows it over a
+            # package-lock.json beside it.
+            for candidate in npm-shrinkwrap.json:npm package-lock.json:npm \
+              yarn.lock:yarn pnpm-lock.yaml:pnpm bun.lock:bun \
+              bun.lockb:bun; do
+              tracked "${candidate%%:*}" || continue
+              if [ -n "$named" ] && [ "${candidate#*:}" != "$named" ]
+              then
+                continue
+              fi
+              for seen in "${found[@]+"${found[@]}"}"; do
+                [ "$seen" = "${candidate#*:}" ] && continue 2
+              done
+              found+=("${candidate#*:}")
+              found_files+=("${candidate%%:*}")
+            done
+            if [ "${#found[@]}" -eq 1 ]; then
+              manager="${found[0]}"
+              lockfile="${found_files[0]}"
+            elif [ "${#found[@]}" -gt 1 ]; then
+              no_install "lockfiles for ${found[*]} are all tracked;" \
+                'name one in package.json packageManager'
+            elif [ -n "$named" ]; then
+              no_install "package.json names $named, and no $named" \
+                'lockfile is tracked'
+            else
+              no_install 'no lockfile is tracked beside package.json;' \
+                'commit the one your package manager writes'
+            fi
+          fi
+          # A yarn.lock is Yarn 1's, or Yarn 2+'s when it carries
+          # '__metadata'. Corepack falls back to Yarn 1 without a
+          # packageManager field, which cannot read the newer format.
+          if [ "$manager" = 'yarn' ]; then
+            if [ -n "$named" ]; then
+              [ "$named_major" -lt 2 ] || manager='yarn-berry'
+            elif grep -q '^__metadata:' "$prefix/yarn.lock"; then
+              manager=''
+              lockfile=''
+              no_install 'yarn.lock is in the Yarn 2+ format; name the' \
+                'Yarn version in package.json packageManager'
+            fi
+          fi
+          # Only Corepack and setup-bun install a named version. npm is
+          # the one bundled with Node.js.
+          case "$manager" in
+            yarn|yarn-berry|pnpm|bun) ;;
+            *) manager_version='' ;;
+          esac
+        fi
+
+        {
+          echo 'setup=true'
+          echo "version=$version"
+          echo "version_source=$version_source"
+          echo "manager=$manager"
+          echo "manager_version=$manager_version"
+          echo "lockfile=$lockfile"
+          echo "skip_reason=$skip_reason"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: 'Set up Node.js'
+      if: >-
+        steps.node_plan.outputs.setup == 'true' &&
+        steps.node_plan.outputs.version != ''
+      # yamllint disable-line rule:line-length
+      uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version: ${{ steps.node_plan.outputs.version }}
+        # No dependency cache: it would be keyed and restored from
+        # the same pull request whose lockfile it is meant to check.
+        package-manager-cache: false
+
+    - name: 'Set up Bun'
+      if: >-
+        steps.node_plan.outputs.setup == 'true' &&
+        steps.node_plan.outputs.manager == 'bun'
+      # yamllint disable-line rule:line-length
+      uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      with:
+        bun-version: ${{ steps.node_plan.outputs.manager_version || 'latest' }}
+        no-cache: true
+
+    - name: 'Prepare Node.js project'
+      # Located by this id in tests/test-node-project.sh, which runs
+      # the step on its own against stand-in package managers.
+      id: node
+      if: steps.node_plan.outputs.setup == 'true'
+      shell: bash
+      env:
+        INPUT_PATH_PREFIX: ${{ inputs.path_prefix }}
+        INPUT_NODE_SETUP: ${{ inputs.node_setup }}
+        INPUT_NODE_INSTALL_SCRIPTS: ${{ inputs.node_install_scripts }}
+        PLAN_VERSION: ${{ steps.node_plan.outputs.version }}
+        PLAN_VERSION_SOURCE: ${{ steps.node_plan.outputs.version_source }}
+        PLAN_MANAGER: ${{ steps.node_plan.outputs.manager }}
+        # yamllint disable-line rule:line-length
+        PLAN_MANAGER_VERSION: ${{ steps.node_plan.outputs.manager_version }}
+        PLAN_LOCKFILE: ${{ steps.node_plan.outputs.lockfile }}
+        PLAN_SKIP_REASON: ${{ steps.node_plan.outputs.skip_reason }}
+      run: |
+        # Prepare Node.js project
+        set -euo pipefail
+        prefix=$(cd -- "$GITHUB_WORKSPACE/$INPUT_PATH_PREFIX" && pwd -P)
+        rows=''
+        warnings=()
+        if [ -n "$PLAN_SKIP_REASON" ]; then
+          warnings+=("Dependencies not installed: $PLAN_SKIP_REASON")
+        fi
+        # Printable characters only, with Markdown's active characters
+        # escaped: tool output lands in table cells.
+        md_escape() {
+          printf '%s' "$1" | tr -cd '[:print:]' |
+            sed 's/[][\\`*_|<>]/\\&/g'
+        }
+        summary() {
+          # $1=outcome line
+          {
+            echo '## 📦 Node.js Project'
+            echo ''
+            echo "$1"
+            if [ -n "$rows" ]; then
+              echo ''
+              echo '| Item | Result |'
+              echo '| ---- | ------ |'
+              printf '%s' "$rows"
+            fi
+            if [ "${#warnings[@]}" -gt 0 ]; then
+              echo ''
+              echo 'Warnings:'
+              echo ''
+              for warning in "${warnings[@]}"; do
+                echo "- $(md_escape "$warning")"
+              done
+            fi
+            echo ''
+          } >> "$GITHUB_STEP_SUMMARY"
+        }
+        fail() {
+          # $1=stage, the remaining arguments the message
+          local stage="$1"
+          shift
+          echo "::error::$* ❌"
+          summary "❌ Failed at $stage: $(md_escape "$*")"
+          exit 1
+        }
+        # As in the plan step: 'auto' warns, 'true' fails.
+        not_prepared() {
+          if [ "$INPUT_NODE_SETUP" = 'true' ]; then
+            fail 'setup' "node_setup is 'true' but $*"
+          fi
+          echo "::warning::Not installing dependencies: $*"
+          warnings+=("Dependencies not installed: $*")
+          echo 'prepared=false' >> "$GITHUB_OUTPUT"
+          summary '⚠️ Not prepared: hooks run without the dependencies'
+          exit 0
+        }
+
+        # setup-node ran when the plan named a version. Without one,
+        # the hooks get the runner's Node.js, if it has one.
+        if ! command -v node > /dev/null 2>&1; then
+          if [ "$INPUT_NODE_SETUP" = 'true' ]; then
+            fail 'setup' "node_setup is 'true' but Node.js is not on" \
+              'PATH; set node_version'
+          fi
+          echo '::notice::Node.js is not on PATH and no version is' \
+            'pinned; the Node.js project was not prepared'
+          echo 'prepared=false' >> "$GITHUB_OUTPUT"
+          summary '⚠️ Not prepared: Node.js is not on PATH'
+          exit 0
+        fi
+        if ! node_version=$(node --version); then
+          fail 'verify' 'node --version failed'
+        fi
+        # A single-line output record, so only what a version can be.
+        node_version="${node_version%%$'\n'*}"
+        if ! [[ "$node_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.+-]*$ ]]
+        then
+          fail 'verify' 'node --version printed something other than' \
+            'a version'
+        fi
+        echo "version=$node_version" >> "$GITHUB_OUTPUT"
+        if [ -n "$PLAN_VERSION" ]; then
+          detail="from $PLAN_VERSION_SOURCE: $PLAN_VERSION"
+        else
+          detail="the runner's; the project pins no version"
+        fi
+        cell="\`$node_version\` ($(md_escape "$detail"))"
+        rows="$rows| Node.js | $cell |"$'\n'
+        echo "Node.js $node_version ($detail) ✅"
+
+        if [ -z "$PLAN_MANAGER" ]; then
+          if [ -n "$PLAN_SKIP_REASON" ]; then
+            echo 'prepared=false' >> "$GITHUB_OUTPUT"
+            summary '⚠️ Not prepared: hooks run without the dependencies'
+          else
+            # 'true' with no package.json: Node.js is all there is.
+            echo 'prepared=true' >> "$GITHUB_OUTPUT"
+            summary '✅ Node.js selected; no package.json to install from'
+          fi
+          exit 0
+        fi
+
+        # Frozen installs: each refuses to change the lockfile, and
+        # fails where it is out of date with package.json rather than
+        # resolving afresh. Corepack runs the Yarn or pnpm release
+        # package.json names (its own default without one), and must
+        # neither prompt nor write packageManager into package.json.
+        export COREPACK_ENABLE_DOWNLOAD_PROMPT=0 COREPACK_ENABLE_AUTO_PIN=0
+        # Lint tools live in devDependencies. NODE_ENV=production, set
+        # by a caller for some other step, or a production or omit=dev
+        # setting in the project's .npmrc or .yarnrc, would make npm,
+        # Yarn 1 and pnpm skip them and report success without them:
+        # each install names dev dependencies explicitly. Yarn 2+
+        # always installs them; Bun has no flag to override a
+        # bunfig.toml 'production = true'.
+        unset NODE_ENV
+        case "$PLAN_MANAGER" in
+          npm)
+            install=(npm ci --no-audit --no-fund --include=dev)
+            no_scripts=(--ignore-scripts)
+            ;;
+          yarn)
+            install=(corepack yarn install --frozen-lockfile
+              --non-interactive --production=false)
+            no_scripts=(--ignore-scripts)
+            ;;
+          yarn-berry)
+            install=(corepack yarn install --immutable)
+            # Yarn 3 replaced Yarn 2's --skip-builds with --mode. The
+            # plan holds a Yarn 2+ project to a named Yarn version.
+            if [ "${PLAN_MANAGER_VERSION%%.*}" = '2' ]; then
+              no_scripts=(--skip-builds)
+            else
+              no_scripts=(--mode=skip-build)
+            fi
+            ;;
+          pnpm)
+            install=(corepack pnpm install --frozen-lockfile --prod=false)
+            no_scripts=(--ignore-scripts)
+            ;;
+          bun)
+            install=(bun install --frozen-lockfile)
+            no_scripts=(--ignore-scripts)
+            ;;
+          *) fail 'install' 'the plan named no known package manager' ;;
+        esac
+        if [ "$INPUT_NODE_INSTALL_SCRIPTS" != 'true' ]; then
+          install+=("${no_scripts[@]}")
+        fi
+        # Node.js 25 stopped bundling Corepack, and an image may strip
+        # it from an older release, so with none on PATH it is
+        # installed with npm, at a pinned release.
+        # Corepack checks the Yarn or pnpm it then fetches against the
+        # npm registry's signing keys.
+        corepack_release='0.36.0'
+        # Its engines.node. Node.js 25 and 20, outside it, are past end
+        # of life; npm installs it there with a warning unless
+        # engine-strict is set, when the install fails.
+        corepack_engines='^22.22.2 || ^24.15.0 || >=26.0.0'
+        if [ "${install[0]}" = 'corepack' ] &&
+          ! command -v corepack > /dev/null 2>&1; then
+          corepack_install=(npm install --global --ignore-scripts
+            --no-audit --no-fund "corepack@$corepack_release")
+          echo "::group::${corepack_install[*]}"
+          if ! command -v npm > /dev/null 2>&1 ||
+            ! "${corepack_install[@]}"; then
+            echo '::endgroup::'
+            not_prepared "corepack is not on PATH for Node.js" \
+              "$node_version, and $PLAN_MANAGER needs it; installing" \
+              "corepack@$corepack_release with npm failed; it supports" \
+              "Node.js $corepack_engines"
+          fi
+          echo '::endgroup::'
+          hash -r
+          if ! command -v corepack > /dev/null 2>&1; then
+            not_prepared "corepack@$corepack_release installed, but" \
+              'corepack is not on PATH'
+          fi
+          cell="✅ \`corepack@$corepack_release\` (none on PATH for"
+          cell="$cell \`$node_version\`)"
+          rows="$rows| Corepack | $cell |"$'\n'
+        fi
+        if [ "${install[0]}" = 'bun' ] &&
+          ! command -v bun > /dev/null 2>&1; then
+          fail 'setup' 'bun is not on PATH after setting it up'
+        fi
+
+        echo "::group::${install[*]} ($PLAN_LOCKFILE)"
+        if ! (cd -- "$prefix" && "${install[@]}"); then
+          echo '::endgroup::'
+          fail 'install' "${install[*]} failed in $INPUT_PATH_PREFIX;" \
+            "is $PLAN_LOCKFILE in sync with package.json?"
+        fi
+        echo '::endgroup::'
+        cell="✅ \`${install[*]}\` from \`$PLAN_LOCKFILE\`"
+        rows="$rows| Dependencies | $cell |"$'\n'
+        echo 'prepared=true' >> "$GITHUB_OUTPUT"
+        summary '✅ Prepared for the hooks'
+        echo "Dependencies installed from $PLAN_LOCKFILE ✅"
 
     - name: 'Cache prek hook environments'
       if: steps.resolve.outputs.run_needed == 'true'

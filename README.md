@@ -85,23 +85,26 @@ rather than the commit shown in these examples:
 
 <!-- markdownlint-disable MD013 -->
 
-| Variable Name        | Required | Description                                                           | Default        |
-| -------------------- | -------- | --------------------------------------------------------------------- | -------------- |
-| hooks                | False    | Space/comma separated hook ids or aliases to run; empty runs ci.skip  |                |
-| skip_hooks           | False    | Space/comma separated hook ids or aliases to EXCLUDE from the run     |                |
-| run_all_hooks        | False    | Run every hook in the configuration (exclusive with hooks)            | false          |
-| per_hook_runs        | False    | Invoke prek once per hook, for one summary row each                   | false          |
-| commit_range         | False    | `<from>..<to>`; also run commit-msg hooks on each commit's message    |                |
-| config_path          | False    | Configuration path; workspace-relative, or absolute in RUNNER_TEMP    |                |
-| config_url           | False    | HTTPS download URL for the configuration (exclusive with config_path) |                |
-| config_sha256        | False    | Expected SHA-256 of the file fetched from config_url                  |                |
-| path_prefix          | False    | Directory location containing project code                            | .              |
-| branch_name          | False    | Checkout this new Git branch before running linting checks            |                |
-| no_checkout          | False    | Don't perform a checkout of the local repository                      | false          |
-| github_token         | False    | Token exported as GITHUB_TOKEN/GH_TOKEN to hooks needing API access   |                |
-| prek_version         | False    | Version of prek used to run the hooks (X.Y.Z, 0.2.20 or newer)        | 0.4.14         |
-| rust_toolchain_setup | False    | Prepare the Rust toolchain for cargo hooks: `auto`, `true` or `false` | auto           |
-| rust_components      | False    | Space/comma separated rustup components added to that toolchain       | rustfmt clippy |
+| Variable Name        | Required | Description                                                            | Default        |
+| -------------------- | -------- | ---------------------------------------------------------------------- | -------------- |
+| hooks                | False    | Space/comma separated hook ids or aliases to run; empty runs ci.skip   |                |
+| skip_hooks           | False    | Space/comma separated hook ids or aliases to EXCLUDE from the run      |                |
+| run_all_hooks        | False    | Run every hook in the configuration (exclusive with hooks)             | false          |
+| per_hook_runs        | False    | Invoke prek once per hook, for one summary row each                    | false          |
+| commit_range         | False    | `<from>..<to>`; also run commit-msg hooks on each commit's message     |                |
+| config_path          | False    | Configuration path; workspace-relative, or absolute in RUNNER_TEMP     |                |
+| config_url           | False    | HTTPS download URL for the configuration (exclusive with config_path)  |                |
+| config_sha256        | False    | Expected SHA-256 of the file fetched from config_url                   |                |
+| path_prefix          | False    | Directory location containing project code                             | .              |
+| branch_name          | False    | Checkout this new Git branch before running linting checks             |                |
+| no_checkout          | False    | Don't perform a checkout of the local repository                       | false          |
+| github_token         | False    | Token exported as GITHUB_TOKEN/GH_TOKEN to hooks needing API access    |                |
+| prek_version         | False    | Version of prek used to run the hooks (X.Y.Z, 0.2.20 or newer)         | 0.4.14         |
+| rust_toolchain_setup | False    | Prepare the Rust toolchain for cargo hooks: `auto`, `true` or `false`  | auto           |
+| rust_components      | False    | Space/comma separated rustup components added to that toolchain        | rustfmt clippy |
+| node_setup           | False    | Prepare a Node.js project for its hooks: `auto`, `true` or `false`     | auto           |
+| node_version         | False    | Node.js version; empty reads `.nvmrc`, `.node-version`, `engines.node` |                |
+| node_install_scripts | False    | Let the package manager run install scripts                            | false          |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -109,12 +112,14 @@ rather than the commit shown in these examples:
 
 <!-- markdownlint-disable MD013 -->
 
-| Output Name     | Description                                                                        |
-| --------------- | ---------------------------------------------------------------------------------- |
-| config_file     | Resolved path of the linting configuration file                                    |
-| hooks_run       | Space-separated hook names run; 'all' for run_all_hooks; empty on no-op or refusal |
-| prek_runs       | 'prek run' commands issued: 1 combined, one per hook, plus one per commit checked  |
-| rust_toolchains | Space-separated Rust toolchains the action prepared; empty when it prepared none   |
+| Output Name     | Description                                                                                               |
+| --------------- | --------------------------------------------------------------------------------------------------------- |
+| config_file     | Resolved path of the linting configuration file                                                           |
+| hooks_run       | Space-separated hook names run; 'all' for run_all_hooks; empty on no-op or refusal                        |
+| prek_runs       | 'prek run' commands issued: 1 combined, one per hook, plus one per commit checked                         |
+| rust_toolchains | Space-separated Rust toolchains the action prepared; empty when it prepared none                          |
+| node_version    | Node.js version the hooks run with (`v22.11.0`); empty when Node.js setup did not run or found no Node.js |
+| node_prepared   | 'true' when the action prepared the Node.js project, else 'false'                                         |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -395,6 +400,122 @@ action did not prepare. The action caches prek's hook environments,
 not cargo's registry or `target/`, so cargo hooks build from scratch
 on every run.
 
+### Node.js / TypeScript projects
+
+ESLint with a flat config and plugins, Prettier and `tsc` must run
+from the project's own `node_modules`, which pre-commit.ci never
+installs. So these belong in local `language: system` hooks listed
+under `ci.skip`, which this action runs by default. Run them in check
+mode: CI should report a problem, not rewrite files and pass.
+
+```yaml
+ci:
+  skip: [eslint, prettier, tsc]
+
+repos:
+  - repo: local
+    hooks:
+      - id: eslint
+        name: eslint
+        entry: npx --no-install eslint --max-warnings=0 --no-warn-ignored
+        language: system
+        types_or: [javascript, jsx, ts, tsx]
+      - id: prettier
+        name: prettier
+        entry: npx --no-install prettier --check --ignore-unknown
+        language: system
+        types_or: [javascript, jsx, ts, tsx]
+      - id: tsc
+        name: tsc
+        entry: npx --no-install tsc --noEmit
+        language: system
+        files: '\.(ts|tsx|mts|cts)$|(^|/)tsconfig[^/]*\.json$'
+        pass_filenames: false
+```
+
+`--no-install` makes `npx` fail rather than fetch whatever release the
+registry holds when the project does not depend on the tool. The
+[actions-template](https://github.com/lfreleng-actions/actions-template)
+`eslint` hook follows the same pattern, adding guards for the ESLint
+major version and the config file.
+
+Use `language: system`, not `language: node`. prek installs a
+`language: node` hook and its `additional_dependencies` into an
+environment of its own. A flat config resolves its `import`s relative
+to itself, from the project's `node_modules`, so it cannot see plugins
+installed there and fails with `Cannot find package
+'typescript-eslint'`. Running the project's own tools also keeps their
+versions in one place, `package.json`.
+
+Before the hooks run, the action prepares the project:
+
+- `node_setup: 'auto'` (default) prepares it when `path_prefix` holds
+  a `package.json` that git tracks; `'true'` prepares any project, and
+  `'false'` never does
+- `node_version` selects the Node.js release, through
+  `actions/setup-node` with its dependency cache off. Left empty, it
+  comes from `.nvmrc`, then `.node-version`, then `engines.node` in
+  `package.json` when that is a plain version rather than a range;
+  with none, the hooks get the runner's Node.js
+- the tracked lockfile chooses the package manager, which installs
+  frozen to it, so an out-of-date lockfile fails rather than resolves
+  afresh:
+
+<!-- markdownlint-disable MD013 -->
+
+| Lockfile                                   | Install                                                    |
+| ------------------------------------------ | ---------------------------------------------------------- |
+| `package-lock.json`, `npm-shrinkwrap.json` | `npm ci`                                                   |
+| `yarn.lock` (Yarn 1)                       | `yarn install --frozen-lockfile`, through Corepack         |
+| `yarn.lock` (Yarn 2+)                      | `yarn install --immutable`, through Corepack               |
+| `pnpm-lock.yaml`                           | `pnpm install --frozen-lockfile`, through Corepack         |
+| `bun.lock`, `bun.lockb`                    | `bun install --frozen-lockfile`, after `oven-sh/setup-bun` |
+
+<!-- markdownlint-enable MD013 -->
+
+- a `packageManager` field in `package.json` (`pnpm@10.34.6`) chooses
+  among tracked lockfiles of different package managers, and sets the
+  Yarn, pnpm or Bun release installed. A Yarn 2+ `yarn.lock` needs
+  one, since Corepack otherwise runs Yarn 1
+- install scripts are off (`--ignore-scripts`; Yarn 2:
+  `--skip-builds`; Yarn 3+: `--mode=skip-build`) unless
+  `node_install_scripts` is `'true'`
+- the install includes devDependencies, where lint tools live, even
+  when `NODE_ENV=production`, set for another step, or a `production`
+  or `omit=dev` setting in the project's `.npmrc` or `.yarnrc` asks
+  otherwise: npm `--include=dev`, Yarn 1 `--production=false`, pnpm
+  `--prod=false`. Yarn 2+ always installs them. Bun has no flag to
+  override `production = true` in a `bunfig.toml`, so keep that out
+  of a Bun project's lint setup
+- Node.js 25 and later no longer bundle Corepack. When no `corepack`
+  is on `PATH`, the action installs a pinned release with npm
+- with a `package.json` but no lockfile to follow, `'auto'` installs
+  nothing and warns, so the hooks run without `node_modules`; `'true'`
+  fails. `'true'` with no `package.json` selects Node.js alone
+
+Yarn 2+ projects need `nodeLinker: node-modules` in `.yarnrc.yml`:
+`npx` cannot find tools under Plug'n'Play.
+
+prek runs every hook from the git top level. When the project sits
+in a subdirectory, set `path_prefix` to it and name it in each hook,
+since `npx` looks for `node_modules` from the top level and `tsc`
+for a `tsconfig.json` there:
+
+```yaml
+entry: npx --prefix web --no-install eslint --max-warnings=0 --no-warn-ignored
+# ...
+entry: npx --prefix web --no-install tsc --noEmit -p web
+```
+
+Under `block` egress, Corepack fetches Yarn 2+ from
+`repo.yarnpkg.com`, Yarn 1 from `registry.yarnpkg.com` and pnpm from
+`registry.npmjs.org`; `oven-sh/setup-bun` downloads Bun from GitHub
+releases.
+
+As for Rust, the action does not read hook entries, and it caches
+prek's hook environments, not `node_modules`, so every run installs
+the dependencies afresh.
+
 ## Security
 
 - No secrets required; `github_token` is optional, and reaches no
@@ -427,6 +548,14 @@ on every run.
   Toolchain names must match `[A-Za-z0-9][A-Za-z0-9._+-]*` and
   `rust_components` entries `[A-Za-z0-9][A-Za-z0-9_-]*`, the latter
   passed behind `--`
+- Node.js preparation installs what the tracked lockfile pins, and no
+  more: frozen, with install scripts off unless `node_install_scripts`
+  is `'true'`, and nothing at all without a lockfile. An untracked
+  `package.json` or lockfile counts for nothing. `node_version`, and a
+  version read from the project, must be a plain version or a
+  `setup-node` alias, never a range. `packageManager` must be
+  `<npm|yarn|pnpm|bun>@<x.y.z>`. The action restores no dependency
+  cache, so nothing a pull request primed can reach a later run
 
 ## Breaking changes from v0.2.x
 

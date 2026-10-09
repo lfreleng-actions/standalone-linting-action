@@ -7,9 +7,20 @@
 #
 # The step is EXTRACTED from action.yaml, never copied, so a suite
 # exercises the code the action runs. Its environment is the step's
-# own 'env' block with each input at its declared default. A missing
-# step, or an env entry that is not a plain input reference, fails
-# the extraction rather than letting a suite test nothing.
+# own 'env' block with each input at its declared default, and each
+# earlier step's output empty, for a suite to set as a case needs. A
+# missing step, or an env entry that is neither a plain input nor a
+# plain step-output reference, fails the extraction rather than
+# letting a suite test nothing.
+
+# A suite run as a hook inside 'git commit' inherits GIT_INDEX_FILE
+# and git's other repository-local variables. In a linked worktree
+# they hold absolute paths, so git in a suite's fixture repository
+# would stage into THIS repository's index. Clear every one.
+while IFS= read -r git_local_var; do
+    unset "${git_local_var}"
+done < <(git rev-parse --local-env-vars)
+unset git_local_var
 
 # Sets PY_RUN to an interpreter that can import yaml.
 #
@@ -67,14 +78,30 @@ if step.get('shell') != 'bash' or not isinstance(step.get('run'), str):
 with open(script_path, 'w', encoding='utf-8') as handle:
     handle.write(step['run'])
 
-# Each env entry must pass one input straight through. Anything else
-# needs a value this suite cannot supply, so refuse it rather than
-# run the step with the variable unset.
+# Each env entry must pass one input, or one output of an earlier
+# step, straight through. Anything else needs a value this suite
+# cannot supply, so refuse it rather than run the step with the
+# variable unset. An output starts empty, as it is when the step that
+# writes it skipped or wrote nothing.
 reference = re.compile(r'\$\{\{\s*inputs\.([A-Za-z0-9_-]+)\s*\}\}')
+output = re.compile(
+    r'\$\{\{\s*steps\.([A-Za-z0-9_-]+)\.outputs\.[A-Za-z0-9_-]+\s*\}\}'
+)
+all_steps = (action.get('runs') or {}).get('steps') or []
+earlier = {
+    other.get('id')
+    for other in all_steps[: all_steps.index(step)]
+    if isinstance(other, dict)
+}
 for name, value in (step.get('env') or {}).items():
+    produced = output.fullmatch(str(value))
+    if produced is not None and produced.group(1) in earlier:
+        sys.stdout.write(f'{name}=\0')
+        continue
     match = reference.fullmatch(str(value))
     if match is None or match.group(1) not in inputs:
-        sys.exit(f'env {name} is not an input reference: {value!r}')
+        sys.exit(f'env {name} is not an input or step-output reference: '
+                 f'{value!r}')
     default = (inputs[match.group(1)] or {}).get('default', '')
     if isinstance(default, bool):
         default = 'true' if default else 'false'

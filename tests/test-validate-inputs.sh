@@ -194,6 +194,18 @@ accept 'rust_toolchain_setup off, no components' \
 accept 'a rust_components entry of 64 characters' \
     INPUT_RUST_COMPONENTS="r$(printf '%063d' 0)"
 
+accept 'node_setup forced on, scripts on, a full version' \
+    INPUT_NODE_SETUP='true' INPUT_NODE_INSTALL_SCRIPTS='true' \
+    INPUT_NODE_VERSION='v22.11.0'
+
+accept 'node_setup off' INPUT_NODE_SETUP='false'
+
+for node_version in 22 22.11 22.x 22.11.x lts/'*' lts/iron node latest \
+    current; do
+    accept "node_version '${node_version}'" \
+        INPUT_NODE_VERSION="${node_version}"
+done
+
 # --- Refused -----------------------------------------------------------
 
 # One per rejection case in testing.yaml that this step refuses, with
@@ -253,6 +265,34 @@ reject 'over-long rust_components entry' \
     "${rust_component_rule}" \
     INPUT_RUST_COMPONENTS="r$(printf '%064d' 0)"
 
+reject 'unknown node_setup' \
+    "node_setup must be 'auto', 'true' or 'false'" \
+    INPUT_NODE_SETUP='yes'
+
+reject 'non-boolean node_install_scripts' \
+    "node_install_scripts must be 'true' or 'false'" \
+    INPUT_NODE_INSTALL_SCRIPTS='yes'
+
+# node_version reaches actions/setup-node, which would read a range
+# as 'the newest release satisfying it'.
+node_version_rule='node_version must be a version such as 22,'
+node_version_rule="${node_version_rule} 22.11.0 or 22.x, or lts/*,"
+node_version_rule="${node_version_rule} lts/<codename>, node, latest"
+node_version_rule="${node_version_rule} or current"
+
+reject 'node_version range' \
+    "${node_version_rule}" \
+    INPUT_NODE_VERSION='>=20'
+
+reject 'node_version wildcard before the patch' \
+    "${node_version_rule}" \
+    INPUT_NODE_VERSION='22.x.1'
+
+# shellcheck disable=SC2016 # the literal, unexpanded, is the point
+reject 'shell-shaped node_version' \
+    "${node_version_rule}" \
+    INPUT_NODE_VERSION='22$(id)'
+
 # The two #159 guards. Each input fails without its guard as well --
 # uvx refuses the version, sha256sum the extra digest record -- so
 # testing.yaml alone cannot show that the guard fired.
@@ -303,6 +343,10 @@ reject 'multi-line commit_range' \
 reject 'multi-line rust_components' \
     'rust_components must not contain control characters' \
     INPUT_RUST_COMPONENTS=$'rustfmt\nclippy'
+
+reject 'multi-line node_version' \
+    'node_version must not contain control characters' \
+    INPUT_NODE_VERSION=$'22\n20'
 
 # --- Result ------------------------------------------------------------
 

@@ -1,0 +1,39 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Fixture configuration for the Node.js job in testing.yaml.
+#
+# The hooks are the ones README.md recommends for Node.js and
+# TypeScript projects, kept identical so the job tests the advice as
+# well as the action: 'language: system' hooks running the project's
+# own ESLint, Prettier and tsc through 'npx --no-install', in check
+# mode, listed under ci.skip because pre-commit.ci installs no
+# node_modules for them to run from.
+#
+# The job copies this file into each generated project as its
+# .pre-commit-config.yaml, so the action runs the ci.skip hooks by
+# default, as it would for a caller.
+
+ci:
+  skip: [eslint, prettier, tsc]
+
+repos:
+  - repo: local
+    hooks:
+      - id: eslint
+        name: eslint
+        entry: npx --no-install eslint --max-warnings=0 --no-warn-ignored
+        language: system
+        types_or: [javascript, jsx, ts, tsx]
+      - id: prettier
+        name: prettier
+        entry: npx --no-install prettier --check --ignore-unknown
+        language: system
+        types_or: [javascript, jsx, ts, tsx]
+      - id: tsc
+        name: tsc
+        entry: npx --no-install tsc --noEmit
+        language: system
+        files: '\.(ts|tsx|mts|cts)$|(^|/)tsconfig[^/]*\.json$'
+        pass_filenames: false
