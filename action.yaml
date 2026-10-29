@@ -65,6 +65,21 @@
 #     cannot redirect where prek installs from today. The flag makes
 #     that a stated property rather than an incidental one, since
 #     nothing in uv's contract promises the asymmetry will hold.
+#   * The inline Python helpers run as 'python -I -'. Code read from
+#     stdin puts the working directory -- the checkout being linted
+#     -- first on sys.path, so a json.py or yaml/ committed there
+#     would be imported in place of the module a helper asks for.
+#     '-I' leaves the working directory off sys.path; the packages
+#     'uv run --with' supplies stay importable.
+#   * Those helpers also run with '--python' and an interpreter found
+#     from the action's own directory with 'uv python find --system
+#     --no-project'. Without it, 'uv run' runs the interpreter of a
+#     .venv in the working directory or any parent, and 'uv python
+#     find' does the same unless given '--system', so setup-uv runs
+#     its lookup in the action directory too, with UV_SYSTEM_PYTHON
+#     set. '--no-project' (UV_NO_PROJECT for setup-uv) keeps the
+#     requires-python of a pyproject.toml in or above that directory
+#     out of the lookup. uvx uses neither.
 name: '🧹 Standalone Linting Action'
 description: 'Runs pre-commit linting hooks with prek, outside pre-commit.ci'
 
@@ -702,8 +717,33 @@ runs:
     - name: 'Set up uv'
       # yamllint disable-line rule:line-length
       uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      # setup-uv runs 'uv python find' in working-directory to report
+      # a Python version, and runs the interpreter it finds. In the
+      # workspace that would be a .venv in the checkout or any parent
+      # of it; the action directory holds no .venv, and for a
+      # published action neither do its parents. UV_NO_CONFIG, on
+      # this step only, also keeps a .python-version out of the
+      # lookup. Unlike the python-version input, which would set
+      # UV_PYTHON for every later step of the caller's job,
+      # working-directory exports nothing of its own. UV_SYSTEM_PYTHON,
+      # also on this step only, skips virtual environments, including
+      # a workspace .venv above an action checked out inside the
+      # workspace (a caller using 'uses: ./'). UV_NO_PROJECT does the
+      # same for the requires-python of a pyproject.toml there.
+      #
+      # It is also where setup-uv reads a uv required-version and
+      # cache-dir, and where the cache glob is rooted. The action pins
+      # the version itself, and what it caches (pyyaml, prek) follows
+      # action.yaml, so the cache is keyed on that file rather than
+      # on the caller's project files.
+      env:
+        UV_NO_CONFIG: '1'
+        UV_SYSTEM_PYTHON: '1'
+        UV_NO_PROJECT: '1'
       with:
         version: '0.13.4'
+        working-directory: ${{ github.action_path }}
+        cache-dependency-glob: 'action.yaml'
 
     - name: 'Resolve configuration and hooks'
       id: resolve
@@ -725,6 +765,31 @@ runs:
       run: |
         # Resolve configuration and hooks
         set -euo pipefail
+        # The Python helpers below run through 'uv run' from the
+        # workspace: the checkout being linted. There uv runs the
+        # interpreter of a .venv in that directory or any parent of
+        # it, so they get '--python' and an interpreter found from the
+        # action's own directory. '--system' skips virtual
+        # environments there too: an action checked out inside the
+        # workspace has the workspace's .venv above it. '--no-project'
+        # likewise ignores the requires-python of the workspace's
+        # pyproject.toml, which would otherwise limit the lookup to
+        # the versions it allows. 'uv python find' never downloads
+        # one, as 'uv run' does when none is installed, so install one
+        # in that case; 'uv python install' does not read
+        # requires-python. Looked up on first use, once per step.
+        py=''
+        find_python() {
+          [ -z "$py" ] || return 0
+          py=$(cd -- "$GITHUB_ACTION_PATH" && export UV_NO_CONFIG=1 &&
+            { uv python find --system --no-project 2> /dev/null ||
+              { uv python install --no-bin >&2 &&
+                uv python find --system --no-project; }; }) || py=''
+          if [ -z "$py" ]; then
+            echo '::error::uv found no Python interpreter ❌'
+            exit 1
+          fi
+        }
         if [ -n "$INPUT_CONFIG_URL" ]; then
           cfg="$DOWNLOADED_CONFIG"
         elif [ -n "$INPUT_CONFIG_PATH" ]; then
@@ -864,10 +929,14 @@ runs:
           # '--no-config' because 'uv run' reads a 'uv.toml' from the
           # working directory, which is the checkout being linted --
           # so without it the repository under test could redirect
-          # the index this action's own tooling comes from.
-          hooks=$(uv run --no-config --no-project \
+          # the index this action's own tooling comes from. '-I'
+          # because code on stdin puts that same directory first on
+          # sys.path, where a yaml/ or re.py would shadow the real
+          # module. '--python': see find_python above.
+          find_python
+          hooks=$(uv run --no-config --no-project --python "$py" \
             --with pyyaml==6.0.2 \
-            python - "$cfg" <<'PYEOF'
+            python -I - "$cfg" <<'PYEOF'
         import re
         import sys
 
@@ -1027,11 +1096,14 @@ runs:
           # 'uv.toml' from the working directory, which here is the
           # checkout being linted. That file can redirect the package
           # index, so the repository under test could otherwise
-          # choose where this action's own tooling comes from.
+          # choose where this action's own tooling comes from. '-I'
+          # keeps the same directory off sys.path, and '--python' a
+          # .venv there out of the run.
+          find_python
           compare_status=0
           hooks=$(PREK_REQUESTED="$hooks" \
-            uv run --no-config --no-project \
-            --with pyyaml==6.0.2 python - \
+            uv run --no-config --no-project --python "$py" \
+            --with pyyaml==6.0.2 python -I - \
             "$cfg" "$surviving" <<'PYEOF'
         import json
         import os
@@ -1691,11 +1763,17 @@ runs:
           # Read with the Python the action already runs through uv,
           # so a runner needs no jq. Prints engines.node, then
           # packageManager: each empty unless a one-line string. Exits
-          # 3 for anything but a JSON object. '--no-config': see the
+          # 3 for anything but a JSON object. '--no-config', '-I' and
+          # the interpreter found from the action directory: see the
           # resolve step.
+          py=$(cd -- "$GITHUB_ACTION_PATH" && export UV_NO_CONFIG=1 &&
+            { uv python find --system --no-project 2> /dev/null ||
+              { uv python install --no-bin >&2 &&
+                uv python find --system --no-project; }; }) || py=''
+          [ -n "$py" ] || fail 'uv found no Python interpreter'
           read_status=0
-          fields=$(uv run --no-config --no-project python - \
-            "$prefix/package.json" <<'PYEOF'
+          fields=$(uv run --no-config --no-project --python "$py" \
+            python -I - "$prefix/package.json" <<'PYEOF'
         import json
         import sys
 
@@ -2100,6 +2178,21 @@ runs:
           unset GITHUB_TOKEN GH_TOKEN
         fi
         export PREK_HOME="$HOME/.cache/prek"
+        # The Python helpers below run in path_prefix, after the cd.
+        # Their interpreter comes from the action directory instead:
+        # see find_python in the resolve step.
+        py=''
+        find_python() {
+          [ -z "$py" ] || return 0
+          py=$(cd -- "$GITHUB_ACTION_PATH" && export UV_NO_CONFIG=1 &&
+            { uv python find --system --no-project 2> /dev/null ||
+              { uv python install --no-bin >&2 &&
+                uv python find --system --no-project; }; }) || py=''
+          if [ -z "$py" ]; then
+            echo '::error::uv found no Python interpreter ❌'
+            exit 1
+          fi
+        }
         cd "$INPUT_PATH_PREFIX"
         if [ -n "$INPUT_BRANCH_NAME" ]; then
           echo "Checking out Git branch: $INPUT_BRANCH_NAME 💬"
@@ -2308,8 +2401,9 @@ runs:
             exit 1
           fi
           check_status=0
+          find_python
           verdict=$(REQUESTED="$RESOLVED_HOOKS" \
-            uv run --no-config --no-project python - \
+            uv run --no-config --no-project --python "$py" python -I - \
             "$known_json" <<'PYEOF') || check_status=$?
         import json
         import os
@@ -2461,8 +2555,9 @@ runs:
             "${skip_args[@]+"${skip_args[@]}"}" > "$msg_list_json" ||
             msg_list_status=$?
           if [ "$msg_list_status" -eq 0 ]; then
-            msg_verdict=$(uv run --no-config --no-project python - \
-              "$msg_list_json" <<'PYEOF'
+            find_python
+            msg_verdict=$(uv run --no-config --no-project --python "$py" \
+              python -I - "$msg_list_json" <<'PYEOF'
         import json
         import sys
 

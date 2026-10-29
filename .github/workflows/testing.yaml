@@ -2605,3 +2605,198 @@ jobs:
           check 'template eslint, error hooks' "$TEMPLATE_ERROR_HOOKS" '?*'
           [ "$status" -eq 0 ] || exit 1
           echo 'Node.js project preparation behaved as expected ✅'
+
+  ### Files in the caller's checkout must not stand in for the action's ###
+  # The resolve, plan and lint steps run Python helpers through
+  # 'uv run ... python -I -', from the workspace or path_prefix: the
+  # caller's checkout. Code on stdin would put that directory first on
+  # sys.path, and uv -- the action's own calls, and setup-uv's
+  # 'uv python find' -- would otherwise take its interpreter from a
+  # .python-version there, or from a .venv there or in a parent
+  # directory, or keep to the requires-python of a pyproject.toml
+  # there. Every planted file records that it ran and fails, so
+  # the action must pass with real outputs and no record.
+  isolation:
+    name: 'Test the action ignores modules in the checkout'
+    runs-on: 'ubuntu-24.04'
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        with:
+          config: '@538904e241556d101fb908b50e2a2965fa0346cf'  # v0.16.6
+
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2  # v2.22.2
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      # yamllint disable-line rule:line-length
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # A project of its own, as a caller's checkout would be: a
+      # ci.skip hook for default mode, a failing hook for skip_hooks
+      # to exclude, and a package.json pinning Node.js 22 (the runner
+      # default is 20) for the plan step to read. No lockfile, so
+      # nothing installs.
+      - name: 'Create the fixture project and plant files'
+        shell: bash
+        run: |
+          # Create the fixture project and plant files
+          set -euo pipefail
+          fixture="$GITHUB_WORKSPACE/isolation-fixture"
+          mkdir -p "$fixture"
+          cat > "$fixture/.pre-commit-config.yaml" <<'YAML'
+          ci:
+            skip: [always-passes]
+          repos:
+            - repo: local
+              hooks:
+                - id: always-passes
+                  name: 'Always passes'
+                  entry: 'true'
+                  language: system
+                  pass_filenames: false
+                  always_run: true
+                - id: always-fails
+                  name: 'Always fails'
+                  entry: 'false'
+                  language: system
+                  pass_filenames: false
+                  always_run: true
+          YAML
+          echo '{"name": "isolation-fixture", "engines": {"node": "22"}}' \
+            > "$fixture/package.json"
+          git -C "$fixture" init -q -b main
+          git -C "$fixture" add -A
+          GIT_AUTHOR_NAME='Fixture Author' \
+          GIT_AUTHOR_EMAIL='author@example.com' \
+          GIT_COMMITTER_NAME='Fixture Committer' \
+          GIT_COMMITTER_EMAIL='committer@example.com' \
+            git -C "$fixture" -c commit.gpgsign=false commit -q -m 'Seed'
+
+          # Untracked, so the hooks never see them. In the workspace
+          # root, where the resolve and plan steps run, and in the
+          # fixture, where the lint step runs.
+          marker="$RUNNER_TEMP/planted-ran"
+          for dir in "$GITHUB_WORKSPACE" "$fixture"; do
+            mkdir -p "$dir/yaml"
+            for module in json.py re.py sitecustomize.py yaml/__init__.py
+            do
+              printf '%s\n' 'import sys' \
+                "open('$marker', 'a').write(__file__ + '\n')" \
+                'sys.exit(97)' > "$dir/$module"
+            done
+            printf '%s\n' '#!/bin/sh' "echo \"\$0\" >> '$marker'" \
+              'exit 97' > "$dir/planted-python"
+            chmod +x "$dir/planted-python"
+            echo "$dir/planted-python" > "$dir/.python-version"
+          done
+
+          # A .venv whose interpreters record that they ran, in the
+          # workspace root and in the fixture. Here 'uses: $/' makes
+          # the workspace root the action's own directory, where
+          # setup-uv and the helpers look up their interpreter, so
+          # this covers a caller using the action from its own
+          # checkout: UV_SYSTEM_PYTHON and '--system' skip the .venv
+          # in and above that directory. tests/test-node-project.sh
+          # covers the published layout, with the action directory
+          # outside the workspace, and one below the workspace root.
+          for dir in "$GITHUB_WORKSPACE" "$fixture"; do
+            mkdir -p "$dir/.venv/bin"
+            printf 'home = /usr/bin\n' > "$dir/.venv/pyvenv.cfg"
+            for exe in python python3; do
+              printf '%s\n' '#!/bin/sh' "echo \"\$0\" >> '$marker'" \
+                'exit 97' > "$dir/.venv/bin/$exe"
+              chmod +x "$dir/.venv/bin/$exe"
+            done
+          done
+
+          # A pyproject.toml in the action's own directory whose
+          # requires-python no runner's Python satisfies. 'uv python
+          # find' keeps to it unless given '--no-project' (or
+          # UV_NO_PROJECT, for setup-uv), and would then find nothing.
+          printf '%s\n' '[project]' 'name = "isolation-root"' \
+            'version = "0"' 'requires-python = ">=2.7,<3"' \
+            > "$GITHUB_WORKSPACE/pyproject.toml"
+          echo 'Fixture created and files planted ✅'
+
+      # Default mode: the resolve step reads ci.skip, the plan step
+      # reads package.json, the lint step checks the named hooks.
+      - name: 'Planted files: default mode'
+        id: planted_default
+        uses: $/
+        continue-on-error: true
+        with:
+          no_checkout: true
+          path_prefix: 'isolation-fixture'
+
+      # Named hooks with an exclusion: the resolve step compares the
+      # request with what survives it. 'always-fails' must be dropped
+      # for this to pass.
+      - name: 'Planted files: named hooks with skip_hooks'
+        id: planted_named
+        uses: $/
+        continue-on-error: true
+        with:
+          no_checkout: true
+          path_prefix: 'isolation-fixture'
+          hooks: 'always-passes, always-fails'
+          skip_hooks: 'always-fails'
+          node_setup: false
+
+      # Run-all with an exclusion: the lint step's stage listing.
+      # 'always-fails' must be excluded for this to pass.
+      - name: 'Planted files: run-all with skip_hooks'
+        id: planted_run_all
+        uses: $/
+        continue-on-error: true
+        with:
+          no_checkout: true
+          path_prefix: 'isolation-fixture'
+          run_all_hooks: true
+          skip_hooks: 'always-fails'
+          node_setup: false
+
+      - name: 'Check no planted file ran'
+        shell: bash
+        env:
+          DEFAULT: ${{ steps.planted_default.outcome }}
+          DEFAULT_HOOKS: ${{ steps.planted_default.outputs.hooks_run }}
+          DEFAULT_NODE: ${{ steps.planted_default.outputs.node_version }}
+          NAMED: ${{ steps.planted_named.outcome }}
+          NAMED_HOOKS: ${{ steps.planted_named.outputs.hooks_run }}
+          RUN_ALL: ${{ steps.planted_run_all.outcome }}
+          RUN_ALL_HOOKS: ${{ steps.planted_run_all.outputs.hooks_run }}
+        run: |
+          # Check no planted file ran
+          status=0
+          check() {
+            # $1=label $2=value $3=glob it must match
+            # shellcheck disable=SC2053
+            if [[ "$2" != $3 ]]; then
+              echo "Error: $1 was '$2', expected '$3' ❌"
+              status=1
+            fi
+          }
+          check 'default mode outcome' "$DEFAULT" 'success'
+          check 'default mode hooks' "$DEFAULT_HOOKS" 'always-passes'
+          check 'default mode Node.js' "$DEFAULT_NODE" 'v22.*'
+          check 'named hooks outcome' "$NAMED" 'success'
+          check 'named hooks hooks' "$NAMED_HOOKS" 'always-passes'
+          check 'run-all outcome' "$RUN_ALL" 'success'
+          check 'run-all hooks' "$RUN_ALL_HOOKS" 'all'
+          if [ -e "$RUNNER_TEMP/planted-ran" ]; then
+            echo 'Error: files planted in the checkout ran ❌'
+            cat "$RUNNER_TEMP/planted-ran"
+            status=1
+          fi
+          [ "$status" -eq 0 ] || exit 1
+          echo 'No planted file ran, and the outputs are real ✅'
