@@ -199,7 +199,15 @@ inputs:
     required: false
     default: ''
   no_checkout:
-    description: 'Do not checkout local repository; used for testing'
+    description: >-
+      Set 'true' when the caller has already prepared the tree to lint,
+      for example a Gerrit change checked out with
+      checkout-gerrit-change-action. The action then skips its own
+      checkout and lints path_prefix as it finds it: it does not
+      fetch, reset or clean the tree. The caller owns that tree at the
+      commit to lint, full history when commit_range is set, and its
+      credentials. path_prefix must be inside a git work tree whose
+      top level is in the workspace, or the action fails.
     required: false
     default: 'false'
   github_token:
@@ -334,8 +342,9 @@ runs:
       if: inputs.no_checkout != 'true'
 
     - name: 'Validate inputs'
-      # Located by this id in tests/test-validate-inputs.sh, which
-      # runs the step on its own to pin each refusal to its guard.
+      # Located by this id in tests/test-validate-inputs.sh and
+      # tests/test-no-checkout.sh, which run the step on its own to
+      # pin each refusal to its guard.
       id: validate
       shell: bash
       env:
@@ -348,6 +357,7 @@ runs:
         INPUT_CONFIG_SHA256: ${{ inputs.config_sha256 }}
         INPUT_PATH_PREFIX: ${{ inputs.path_prefix }}
         INPUT_BRANCH_NAME: ${{ inputs.branch_name }}
+        INPUT_NO_CHECKOUT: ${{ inputs.no_checkout }}
         INPUT_PREK_VERSION: ${{ inputs.prek_version }}
         INPUT_COMMIT_RANGE: ${{ inputs.commit_range }}
         INPUT_RUST_TOOLCHAIN_SETUP: ${{ inputs.rust_toolchain_setup }}
@@ -604,6 +614,7 @@ runs:
         # the permitted root(s).
         ws=$(realpath -e -- "$GITHUB_WORKSPACE")
         tmp=$(realpath -e -- "$RUNNER_TEMP")
+        prefix_abs=''
 
         case "$INPUT_PATH_PREFIX" in
           /*) err 'path_prefix must be a relative path' ;;
@@ -617,6 +628,8 @@ runs:
                     "$ws"|"$ws"/*)
                       if [ ! -d "$abs" ]; then
                         err 'path_prefix is not a directory'
+                      else
+                        prefix_abs="$abs"
                       fi
                       ;;
                     *) err 'path_prefix escapes the workspace' ;;
@@ -629,6 +642,30 @@ runs:
             esac
             ;;
         esac
+
+        # With no_checkout the caller prepares the tree, and the
+        # action lints whatever is at path_prefix. A checkout that went
+        # somewhere else must fail here, never lint nothing and pass,
+        # so path_prefix has to sit in a git work tree whose top level
+        # is inside the workspace: a workspace nested in some other
+        # repository does not count. Compared case-insensitively, as
+        # the checkout step's 'if' compares it.
+        if [ "${INPUT_NO_CHECKOUT,,}" = 'true' ] && [ -n "$prefix_abs" ]
+        then
+          top=$(git -C "$prefix_abs" rev-parse --show-toplevel \
+            2> /dev/null) || top=''
+          if [ -n "$top" ]; then
+            top=$(realpath -e -- "$top" 2> /dev/null) || top=''
+          fi
+          case "$top" in
+            "$ws"|"$ws"/*) ;;
+            *)
+              tree_msg='no_checkout is set, but path_prefix is not in'
+              tree_msg="$tree_msg a git work tree in the workspace:"
+              err "$tree_msg $INPUT_PATH_PREFIX"
+              ;;
+          esac
+        fi
 
         if [ -n "$INPUT_CONFIG_PATH" ]; then
           case "$INPUT_CONFIG_PATH" in

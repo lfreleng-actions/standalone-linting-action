@@ -2605,3 +2605,196 @@ jobs:
           check 'template eslint, error hooks' "$TEMPLATE_ERROR_HOOKS" '?*'
           [ "$status" -eq 0 ] || exit 1
           echo 'Node.js project preparation behaved as expected ✅'
+
+  ### A caller that prepares the tree itself ###
+  # The state a Gerrit caller leaves: a different repository at the
+  # workspace root, HEAD detached at a commit no remote branch holds,
+  # and no credentials persisted. This job never checks out this
+  # repository; 'uses: $/' resolves the action at the running commit.
+  caller-tree:
+    name: 'Test a caller-prepared tree'
+    runs-on: 'ubuntu-24.04'
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      # Before any checkout the workspace holds no tree, as when a
+      # caller's checkout went somewhere else.
+      - name: 'Create an empty directory'
+        shell: bash
+        run: |
+          # Create an empty directory
+          set -euo pipefail
+          if git rev-parse --is-inside-work-tree > /dev/null 2>&1; then
+            echo 'Error: the workspace already holds a git tree ❌'
+            exit 1
+          fi
+          mkdir empty-tree
+
+      # Refused by the validate step. Without that refusal the run
+      # still fails, later, finding no configuration file;
+      # tests/test-no-checkout.sh pins the failure to the refusal.
+      - name: "Running local action: ${{ github.repository }} [No tree]"
+        id: no_tree
+        uses: $/
+        continue-on-error: true
+        with:
+          no_checkout: 'true'
+          path_prefix: 'empty-tree'
+          hooks: 'check-yaml'
+
+      - name: 'Check the empty directory was refused'
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.no_tree.outcome }}
+          HOOKS_RUN: ${{ steps.no_tree.outputs.hooks_run }}
+        run: |
+          # Check the empty directory was refused
+          set -euo pipefail
+          if [ "$OUTCOME" != 'failure' ]; then
+            echo "Error: expected a failure, got '$OUTCOME' ❌"
+            exit 1
+          fi
+          if [ -n "$HOOKS_RUN" ]; then
+            echo "Error: hooks ran over an empty directory: $HOOKS_RUN ❌"
+            exit 1
+          fi
+          rmdir empty-tree
+          echo 'no_checkout over an empty directory failed ✅'
+
+      - name: 'Checkout the caller repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: 'lfreleng-actions/test-python-project'
+          ref: 'fa2b3ceb7a405d8c001f67f50722a93d24f69ae8'
+          persist-credentials: false
+
+      # A change under review: a local commit on top of the checkout,
+      # so HEAD is detached at a commit no remote branch holds.
+      - name: 'Add a local commit'
+        shell: bash
+        run: |
+          # Add a local commit
+          set -euo pipefail
+          if git config --get-regexp \
+            '^(http\..*\.extraheader|includeif\..*\.path)$' > /dev/null
+          then
+            echo 'Error: checkout credentials persisted ❌'
+            exit 1
+          fi
+          printf 'Changed by the caller before linting\n' \
+            > caller-change.txt
+          git add caller-change.txt
+          git -c user.name='Caller' -c user.email='caller@example.com' \
+            -c commit.gpgsign=false commit -q -m 'Chore: Local change'
+          if git symbolic-ref -q HEAD > /dev/null; then
+            echo 'Error: HEAD is on a branch, not detached ❌'
+            exit 1
+          fi
+          if [ -n "$(git branch -r --contains HEAD)" ]; then
+            echo 'Error: a remote branch holds the local commit ❌'
+            exit 1
+          fi
+          echo "Local commit: $(git rev-parse HEAD) 💬"
+
+      - name: 'Record the tree state'
+        id: before
+        shell: bash
+        run: |
+          # Record the tree state
+          set -euo pipefail
+          echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          if [ -n "$(git status --porcelain)" ]; then
+            echo 'Error: the tree is not clean before the run ❌'
+            exit 1
+          fi
+
+      # A hook subset the tree satisfies.
+      - name: "Running local action: ${{ github.repository }} [Caller tree]"
+        id: clean
+        uses: $/
+        with:
+          no_checkout: 'true'
+          hooks: 'check-yaml, end-of-file-fixer, trailing-whitespace'
+
+      - name: 'Check the run left the tree alone'
+        shell: bash
+        env:
+          HEAD_BEFORE: ${{ steps.before.outputs.head }}
+          CONFIG_FILE: ${{ steps.clean.outputs.config_file }}
+          HOOKS_RUN: ${{ steps.clean.outputs.hooks_run }}
+        run: |
+          # Check the run left the tree alone
+          set -euo pipefail
+          if [ "$(git rev-parse HEAD)" != "$HEAD_BEFORE" ]; then
+            echo 'Error: HEAD moved during the run ❌'
+            exit 1
+          fi
+          if [ -n "$(git status --porcelain)" ]; then
+            echo 'Error: the run changed the tree ❌'
+            git status --porcelain
+            exit 1
+          fi
+          expected=$(realpath -e -- \
+            "$GITHUB_WORKSPACE/.pre-commit-config.yaml")
+          if [ "$CONFIG_FILE" != "$expected" ]; then
+            echo "Error: config_file is '$CONFIG_FILE' ❌"
+            exit 1
+          fi
+          wanted='check-yaml end-of-file-fixer trailing-whitespace'
+          if [ "$HOOKS_RUN" != "$wanted" ]; then
+            echo "Error: hooks_run is '$HOOKS_RUN' ❌"
+            exit 1
+          fi
+          echo 'Linted the caller tree in place ✅'
+
+      # The same run over a commit planting malformed YAML must fail,
+      # and pass again once a further commit reverts it: the failure
+      # comes from linting the commit HEAD holds.
+      - name: 'Plant a YAML defect'
+        shell: bash
+        run: |
+          # Plant a YAML defect
+          set -euo pipefail
+          printf 'defect: [unclosed\n' > caller-defect.yaml
+          git add caller-defect.yaml
+          git -c user.name='Caller' -c user.email='caller@example.com' \
+            -c commit.gpgsign=false commit -q -m 'Chore: Plant a defect'
+
+      - name: "Running local action: ${{ github.repository }} [Defect]"
+        id: defect
+        uses: $/
+        continue-on-error: true
+        with:
+          no_checkout: 'true'
+          hooks: 'check-yaml, end-of-file-fixer, trailing-whitespace'
+
+      - name: 'Check the defect failed the run'
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.defect.outcome }}
+          HOOKS_RUN: ${{ steps.defect.outputs.hooks_run }}
+        run: |
+          # Check the defect failed the run
+          set -euo pipefail
+          if [ "$OUTCOME" != 'failure' ]; then
+            echo "Error: expected a failure, got '$OUTCOME' ❌"
+            exit 1
+          fi
+          # hooks_run is set once prek starts, so the failure came
+          # from the hooks rather than a refusal.
+          wanted='check-yaml end-of-file-fixer trailing-whitespace'
+          if [ "$HOOKS_RUN" != "$wanted" ]; then
+            echo "Error: hooks_run is '$HOOKS_RUN' ❌"
+            exit 1
+          fi
+          git -c user.name='Caller' -c user.email='caller@example.com' \
+            -c commit.gpgsign=false revert --no-edit HEAD > /dev/null
+          echo 'The planted defect failed the run ✅'
+
+      - name: "Running local action: ${{ github.repository }} [Reverted]"
+        uses: $/
+        with:
+          no_checkout: 'true'
+          hooks: 'check-yaml, end-of-file-fixer, trailing-whitespace'

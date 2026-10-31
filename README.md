@@ -97,7 +97,7 @@ rather than the commit shown in these examples:
 | config_sha256        | False    | Expected SHA-256 of the file fetched from config_url                   |                |
 | path_prefix          | False    | Directory location containing project code                             | .              |
 | branch_name          | False    | Checkout this new Git branch before running linting checks             |                |
-| no_checkout          | False    | Don't perform a checkout of the local repository                       | false          |
+| no_checkout          | False    | Lint the tree the caller prepared at path_prefix; skip the checkout    | false          |
 | github_token         | False    | Token exported as GITHUB_TOKEN/GH_TOKEN to hooks needing API access    |                |
 | prek_version         | False    | Version of prek used to run the hooks (X.Y.Z, 0.2.20 or newer)         | 0.4.14         |
 | rust_toolchain_setup | False    | Prepare the Rust toolchain for cargo hooks: `auto`, `true` or `false`  | auto           |
@@ -330,6 +330,72 @@ action issues a notice that it checked no message. Without a range,
 `run_all_hooks` issues one naming each configured hook that the
 `commit-msg` stage alone reaches. Naming such a hook in `hooks`
 without a range fails the run, as above.
+
+### Caller-prepared trees
+
+By default the action checks out the repository that triggered the
+workflow, at `github.sha`. A caller linting anything else, such as a
+Gerrit change, prepares the tree itself and passes
+`no_checkout: 'true'`. Without it, the action's own checkout replaces
+that tree, lints the wrong commit, and can report success.
+
+With `no_checkout: 'true'` the caller owns:
+
+- the work tree at `path_prefix`, at the commit to lint. The action
+  does not fetch, reset or clean it. It fails when `path_prefix` is
+  not inside a git work tree whose top level lies in the workspace;
+- full history when it sets `commit_range` (see
+  [Commit messages](#commit-messages));
+- credentials. Hooks run the tree's own code, so a caller linting an
+  untrusted change checks out with `persist-credentials: false`, or
+  removes persisted credentials first, and passes no `github_token`.
+
+`checkout-gerrit-change-action` persists its token and offers no way
+to turn that off, so a Gerrit caller removes it before linting, as
+the `tox-verify.yaml` workflow in `generic-workflows` does. The
+refusal of a missing tree is newer than the release these examples
+pin, so pin one that includes it:
+
+<!-- markdownlint-disable MD013 -->
+
+```yaml
+      - uses: lfreleng-actions/checkout-gerrit-change-action@f0dd3d4dd4fceff1f56348152ecf0e040594f16a # v1.2.1
+        with:
+          gerrit-refspec: ${{ inputs.GERRIT_REFSPEC }}
+          gerrit-project: ${{ inputs.GERRIT_PROJECT }}
+          gerrit-url: ${{ vars.GERRIT_URL }}
+          delay: '0s'
+
+      # Hooks run the change's code: drop the persisted token first
+      - name: 'Remove checkout credentials'
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' entry; do
+            key=${entry%%$'\n'*}
+            value=${entry#*$'\n'}
+            case "${value##*/}" in
+              git-credentials-*.config)
+                rm -f -- "$value"
+                git config --local --unset-all "$key" || [ $? -eq 5 ]
+                ;;
+            esac
+          done < <(git config --local -z --get-regexp '^includeif\..*\.path$' || true)
+          while IFS= read -r -d '' entry; do
+            git config --local --unset-all "${entry%%$'\n'*}" || [ $? -eq 5 ]
+          done < <(git config --local -z --get-regexp '^http\..*\.extraheader$' || true)
+          if git config --get-regexp '^http\..*\.extraheader$' > /dev/null; then
+            echo '::error::Checkout credentials remain'
+            exit 1
+          fi
+
+      - uses: lfreleng-actions/standalone-linting-action@760ff830dcccde04ca780cd2a7ca36e79ebbd530 # v0.4.1
+        with:
+          no_checkout: 'true'
+          run_all_hooks: 'true'
+```
+
+<!-- markdownlint-enable MD013 -->
 
 ### Rust projects
 
