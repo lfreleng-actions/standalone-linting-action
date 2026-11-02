@@ -777,7 +777,7 @@ runs:
       # checks that cache_hooks gates its cache. 'auto' is setup-uv's
       # own default, so cache_hooks 'true' keeps its usual behaviour.
       # yamllint disable-line rule:line-length
-      uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
       # setup-uv runs 'uv python find' in working-directory to report
       # a Python version, and runs the interpreter it finds. In the
       # workspace that would be a .venv in the checkout or any parent
