@@ -2891,8 +2891,9 @@ jobs:
           fetch_log 'Test a caller-prepared tree' "$logs/caller.log"
 
           # actions/cache's restore, miss, save and hit messages, held
-          # to the prek- key: setup-uv logs the same messages for its
-          # own setup-uv- cache, which the check below reads.
+          # to the prek- key: the 'Cache uv downloads' step logs the
+          # same messages for its standalone-linting-uv- key, which the
+          # check below reads.
           markers='Cache restored from key: prek-'
           markers="$markers|Cache not found for input keys: prek-"
           markers="$markers|Cache saved with key: prek-"
@@ -2907,20 +2908,21 @@ jobs:
             echo 'Error: the caller-tree log is not the one expected ❌'
             exit 1
           fi
-          # The prek cache step is the action's only actions/cache
-          # step, so its header counts too: it shows the step ran even
-          # where the restore logged nothing above.
+          # The prek and uv cache steps are the action's only
+          # actions/cache steps, so their header counts too: it shows
+          # a step ran even where the restore logged nothing above.
           if grep -E "$markers|Run actions/cache@" "$logs/caller.log"; then
-            echo 'Error: the caller-tree job ran the prek cache ❌'
+            echo 'Error: the caller-tree job ran an actions/cache step ❌'
             exit 1
           fi
 
-          # setup-uv's own cache, which cache_hooks also controls: any
-          # restore, miss, save or hit names its setup-uv- key. The
-          # tests job runs with the cache on, so it must show one.
-          uv_markers='keys?:? setup-uv-'
+          # The 'Cache uv downloads' step, which cache_hooks also
+          # controls: any restore, miss, save or hit names its
+          # standalone-linting-uv- key. setup-uv's own cache is off.
+          # The tests job runs with the cache on, so it must show one.
+          uv_markers='keys?:? standalone-linting-uv-'
           if ! grep -qiE "$uv_markers" "$logs/tests.log"; then
-            echo 'Error: the tests job log shows no setup-uv cache ❌'
+            echo 'Error: the tests job log shows no uv cache ❌'
             echo '       The markers this check reads may have changed.'
             exit 1
           fi
@@ -2935,11 +2937,12 @@ jobs:
   # 'uv run ... python -I -', from the workspace or path_prefix: the
   # caller's checkout. Code on stdin would put that directory first on
   # sys.path, and uv -- the action's own calls, and setup-uv's
-  # 'uv python find' -- would otherwise take its interpreter from a
+  # 'uv python find' -- could otherwise take its interpreter from a
   # .python-version there, or from a .venv there or in a parent
   # directory, or keep to the requires-python of a pyproject.toml
   # there. Every planted file records that it ran and fails, so
-  # the action must pass with real outputs and no record.
+  # the action must pass with real outputs and no record. The
+  # 'isolation-env' job covers the caller's job environment.
   isolation:
     name: 'Test the action ignores modules in the checkout'
     runs-on: 'ubuntu-24.04'
@@ -3027,10 +3030,10 @@ jobs:
           # A .venv whose interpreters record that they ran, in the
           # workspace root and in the fixture. Here 'uses: $/' makes
           # the workspace root the action's own directory, where
-          # setup-uv and the helpers look up their interpreter, so
-          # this covers a caller using the action from its own
-          # checkout: UV_SYSTEM_PYTHON and '--system' skip the .venv
-          # in and above that directory.
+          # setup-uv runs, so this covers a caller using the action
+          # from its own checkout: setup-uv refuses every lookup, and
+          # the helpers name the interpreter the 'Install Python'
+          # step installed.
           # tests/test-node-project-steps.sh covers the published
           # layout, with the action directory outside the workspace,
           # and one below the workspace root.
@@ -3045,9 +3048,9 @@ jobs:
           done
 
           # A pyproject.toml in the action's own directory whose
-          # requires-python no runner's Python satisfies. 'uv python
-          # find' keeps to it unless given '--no-project' (or
-          # UV_NO_PROJECT, for setup-uv), and would then find nothing.
+          # requires-python no runner's Python satisfies. uv keeps to
+          # it unless given '--no-project' (or UV_NO_PROJECT, for
+          # setup-uv), and would then refuse the installed Python.
           printf '%s\n' '[project]' 'name = "isolation-root"' \
             'version = "0"' 'requires-python = ">=2.7,<3"' \
             > "$GITHUB_WORKSPACE/pyproject.toml"
@@ -3125,3 +3128,205 @@ jobs:
           fi
           [ "$status" -eq 0 ] || exit 1
           echo 'No planted file ran, and the outputs are real ✅'
+
+  ### The caller's job environment must not pick the action's Python ###
+  # An earlier step of a caller's job can set PATH, UV_PYTHON*,
+  # VIRTUAL_ENV, CONDA_PREFIX, UV_INTERNAL__PARENT_INTERPRETER and
+  # PYTHON* through GITHUB_PATH and GITHUB_ENV, and so reach every
+  # later step, the action's included. Each leg plants interpreters
+  # that record that they ran and fail, steers uv at them one way,
+  # then runs the action twice: cold, and warm from the uv cache. The
+  # action must pass with real outputs, no record, and no directory
+  # named by the caller's environment put on PATH. The 'request' leg
+  # names the bait; the 'active-environment' leg makes it look like
+  # an active virtual or conda environment. Linux only: the action
+  # needs GNU coreutils and Bash 4.
+  isolation-env:
+    name: 'Test the action ignores the caller environment'
+    runs-on: 'ubuntu-24.04'
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        selector: ['request', 'active-environment']
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
+        with:
+          config: '@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
+
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      # yamllint disable-line rule:line-length
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The same fixture as the 'isolation' job: ci.skip names the
+      # hook default mode runs, and package.json pins Node.js 22.
+      - name: 'Create the fixture and plant the bait'
+        shell: bash
+        env:
+          SELECTOR: ${{ matrix.selector }}
+        run: |
+          # Create the fixture and plant the bait
+          set -euo pipefail
+          ws="$GITHUB_WORKSPACE"
+          fixture="$ws/isolation-fixture"
+          mkdir -p "$fixture"
+          cat > "$fixture/.pre-commit-config.yaml" <<'YAML'
+          ci:
+            skip: [always-passes]
+          repos:
+            - repo: local
+              hooks:
+                - id: always-passes
+                  name: 'Always passes'
+                  entry: 'true'
+                  language: system
+                  pass_filenames: false
+                  always_run: true
+          YAML
+          echo '{"name": "isolation-fixture", "engines": {"node": "22"}}' \
+            > "$fixture/package.json"
+          git -C "$fixture" init -q -b main
+          git -C "$fixture" add -A
+          GIT_AUTHOR_NAME='Fixture Author' \
+          GIT_AUTHOR_EMAIL='author@example.com' \
+          GIT_COMMITTER_NAME='Fixture Committer' \
+          GIT_COMMITTER_EMAIL='committer@example.com' \
+            git -C "$fixture" -c commit.gpgsign=false commit -q -m 'Seed'
+
+          # Every bait records that it ran, then fails.
+          marker="$RUNNER_TEMP/bait-ran"
+          bait() {
+            printf '%s\n' '#!/bin/sh' "echo \"\$0\" >> '$marker'" \
+              'exit 97' > "$1"
+            chmod +x "$1"
+          }
+          venv="$ws/.venv"
+          mkdir -p "$venv/bin" "$venv/conda-meta" "$ws/xdg-bin"
+          printf 'home = /usr/bin\nversion = 3.13.0\n' > "$venv/pyvenv.cfg"
+          for exe in python python3 python3.13 uv uvx; do
+            bait "$venv/bin/$exe"
+          done
+          bait "$ws/xdg-bin/env"
+          bait "$ws/xdg-bin/bash"
+          # Standard-library names, where PYTHONPATH or the working
+          # directory would put them first on sys.path.
+          for dir in "$ws/pkg" "$ws" "$fixture"; do
+            mkdir -p "$dir/urllib"
+            for module in json.py base64.py sitecustomize.py \
+                usercustomize.py urllib/__init__.py; do
+              printf '%s\n' 'import sys' \
+                "open('$marker', 'a').write(__file__ + '\n')" \
+                'sys.exit(97)' > "$dir/$module"
+            done
+          done
+
+          # Control: the bait runs when a Python follows the planted
+          # settings. Here, before GITHUB_ENV applies them, since a
+          # PYTHONHOME pointing nowhere stops any Python that reads it.
+          (cd "$ws" && PYTHONPATH=pkg /usr/bin/python3 -c 'import json') \
+            > /dev/null 2>&1 || true
+          if [ ! -s "$marker" ]; then
+            echo 'Error: the control did not run the bait ❌'
+            exit 1
+          fi
+          rm -f "$marker"
+
+          echo "$venv/bin" >> "$GITHUB_PATH"
+          case "$RUNNER_ARCH" in
+            ARM64) arch=aarch64 ;;
+            *) arch=x86_64 ;;
+          esac
+          {
+            echo "PYTHONPATH=pkg:."
+            echo "PYTHONHOME=$ws/pkg"
+            echo "PYTHONUSERBASE=$ws/pkg"
+            echo "PYTHONSTARTUP=$ws/json.py"
+            echo "PYTHONEXECUTABLE=$venv/bin/python3"
+            echo "__PYVENV_LAUNCHER__=$venv/bin/python3"
+            echo 'UV_NO_CACHE=1'
+            echo "UV_PYTHON_ARCH=$arch"
+            echo 'UV_PYTHON_INSTALL_MIRROR=https://127.0.0.1:9'
+            echo "XDG_BIN_HOME=$ws/xdg-bin"
+            if [ "$SELECTOR" = 'request' ]; then
+              echo "UV_PYTHON=$venv/bin/python3"
+              echo "UV_PYTHON_SEARCH_PATH=$venv/bin"
+              echo "UV_PYTHON_INSTALL_DIR=$ws/uv-python"
+              echo 'UV_PYTHON_PREFERENCE=only-system'
+            else
+              echo "VIRTUAL_ENV=$venv"
+              echo "CONDA_PREFIX=$venv"
+              echo 'CONDA_DEFAULT_ENV=base'
+              echo "UV_INTERNAL__PARENT_INTERPRETER=$venv/bin/python3"
+              echo "UV_INTERNAL__TEST_PYTHON_MANAGED=$venv/bin/python3"
+              echo "UV_CACHE_DIR=$ws/uv-cache"
+            fi
+          } >> "$GITHUB_ENV"
+          echo "Fixture created, bait planted for '$SELECTOR' ✅"
+
+      - name: 'Planted environment: cold'
+        id: cold
+        uses: $/
+        continue-on-error: true
+        with:
+          no_checkout: true
+          path_prefix: 'isolation-fixture'
+
+      - name: 'Planted environment: warm'
+        id: warm
+        uses: $/
+        continue-on-error: true
+        with:
+          no_checkout: true
+          path_prefix: 'isolation-fixture'
+
+      - name: 'Check no bait ran'
+        shell: bash
+        env:
+          COLD: ${{ steps.cold.outcome }}
+          COLD_HOOKS: ${{ steps.cold.outputs.hooks_run }}
+          COLD_NODE: ${{ steps.cold.outputs.node_version }}
+          WARM: ${{ steps.warm.outcome }}
+          WARM_HOOKS: ${{ steps.warm.outputs.hooks_run }}
+          WARM_NODE: ${{ steps.warm.outputs.node_version }}
+        run: |
+          # Check no bait ran
+          status=0
+          check() {
+            # $1=label $2=value $3=glob it must match
+            # shellcheck disable=SC2053
+            if [[ "$2" != $3 ]]; then
+              echo "Error: $1 was '$2', expected '$3' ❌"
+              status=1
+            fi
+          }
+          check 'cold outcome' "$COLD" 'success'
+          check 'cold hooks' "$COLD_HOOKS" 'always-passes'
+          check 'cold Node.js' "$COLD_NODE" 'v22.*'
+          check 'warm outcome' "$WARM" 'success'
+          check 'warm hooks' "$WARM_HOOKS" 'always-passes'
+          check 'warm Node.js' "$WARM_NODE" 'v22.*'
+          if [ -e "$RUNNER_TEMP/bait-ran" ]; then
+            echo 'Error: planted bait ran ❌'
+            cat "$RUNNER_TEMP/bait-ran"
+            status=1
+          fi
+          case ":$PATH:" in
+            *":$GITHUB_WORKSPACE/xdg-bin:"*)
+              echo "Error: the caller's XDG_BIN_HOME is on PATH ❌"
+              status=1
+              ;;
+          esac
+          [ "$status" -eq 0 ] || exit 1
+          echo 'No bait ran, and the outputs are real ✅'
