@@ -66,6 +66,15 @@ repos:
         pass_filenames: false
         # yamllint disable-line rule:line-length
         files: '^(action\.yaml|tests/(test-no-checkout|lib/action-step)\.sh)$'
+      - id: python-isolation-contract
+        name: Python isolation contract
+        # Through bash: the suite carries no executable bit.
+        entry: bash tests/test-python-isolation.sh
+        language: python
+        additional_dependencies: ['pyyaml==6.0.2']
+        pass_filenames: false
+        # yamllint disable-line rule:line-length
+        files: '^(action\.yaml|tests/(test-python-isolation|lib/action-step)\.sh)$'
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c  # frozen: v6.0.0

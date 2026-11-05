@@ -645,6 +645,18 @@ the dependencies afresh.
   prek's hook environments and uv's cache alike, for a caller linting
   an untrusted change in a cache scope that trusted runs share (see
   [Caller-prepared trees](#caller-prepared-trees))
+- The caller's job environment cannot choose the Python the action
+  runs. A `PATH`, `UV_PYTHON*`, `VIRTUAL_ENV`, `CONDA_PREFIX` or
+  `.venv` an earlier step left behind is never consulted: each run
+  has uv install its own Python 3.13 under `RUNNER_TEMP`, with an
+  empty environment apart from proxy and TLS settings, and runs prek
+  and its helpers with that interpreter, named by absolute path.
+  `setup-uv`'s own cache stays off; with `cache_hooks: 'true'` an
+  `actions/cache` step caches the action's uv cache instead
+- The action trusts the caller's `PATH` itself: the runner finds
+  `bash` on it for every step, and `setup-uv` runs its own tools from
+  it, so a caller that lets untrusted code write to `PATH` or
+  `GITHUB_PATH` has lost before any action runs
 
 ## Breaking changes from v0.2.x
 

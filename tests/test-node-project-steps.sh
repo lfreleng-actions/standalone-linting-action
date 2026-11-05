@@ -101,7 +101,7 @@ toolbin="${workdir}/toolbin"
 mkdir "${toolbin}"
 
 # The plan step reads package.json with Python through uv, which the
-# action provisions. This stand-in accepts only the step's uv calls and
+# action provisions. This stand-in accepts only the step's uv call and
 # runs the Python running this suite with the step's own Python
 # arguments, as 'uv run ... python' does, so no case needs uv, or
 # reaches a network, and a case sees what those arguments put on
@@ -112,20 +112,10 @@ mkdir "${toolbin}"
 # sys.executable: a 'python3' on PATH may be a shim script needing
 # more of PATH than a case gives it.
 #
-# It models how uv picks an interpreter, measured on uv 0.11.21 and
-# 0.13.4: 'uv python find', and 'uv run' without '--python', take
-# .venv/bin/python3 from the working directory or the nearest parent
-# holding a .venv with a pyvenv.cfg. uv runs that interpreter to
-# query it and passes over one that fails, so a call that succeeds
-# says nothing about whether it ran. 'uv python find --system' skips
-# virtual environments. Unless given '--no-project', 'uv python find'
-# also applies the requires-python of the nearest pyproject.toml in
-# the working directory or a parent, and fails when the interpreter
-# does not satisfy it; 'uv run --no-project' and 'uv python install'
-# do not read it. '--python' must be absolute. With
-# FAKE_UV_NO_PYTHON set, no interpreter outside a .venv is installed
-# until 'uv python install --no-bin' runs, and 'uv python find' fails
-# when it finds none, as uv's does.
+# The step must name its cache and its interpreter, by absolute path,
+# as the 'Install Python' step reports them: anything else, a lookup
+# included, is refused, so a step that let uv choose an interpreter
+# fails here rather than run one from a .venv in the workspace.
 python_bin="$(python3 -I -c 'import sys; print(sys.executable)' \
     2> /dev/null || true)"
 if [ -z "${python_bin}" ]; then
@@ -139,101 +129,15 @@ unexpected() {
     echo "stand-in uv: unexpected call: \$*" >&2
     exit 2
 }
-installed="\${FAKE_LOG%/*}/uv-python-installed"
-# The requires-python of the nearest pyproject.toml, empty when that
-# file sets none: a nearer one without it hides one further up.
-requires_python() {
-    local dir="\$PWD"
-    while :; do
-        if [ -f "\${dir}/pyproject.toml" ]; then
-            sed -n 's/^requires-python *= *"\([^"]*\)".*/\1/p' \\
-                "\${dir}/pyproject.toml"
-            return
-        fi
-        [ -n "\${dir}" ] || return
-        dir="\${dir%/*}"
-    done
-}
-# Exits 0 when the interpreter satisfies the specifier in \$1, 1 when
-# not, and 3 for a clause this model does not read.
-satisfies() {
-    '${python_bin}' -I -S -c '
-import operator
-import sys
-
-ops = {">=": operator.ge, "<=": operator.le, "==": operator.eq,
-       "!=": operator.ne, ">": operator.gt, "<": operator.lt}
-ok = True
-for clause in sys.argv[1].replace(" ", "").split(","):
-    op = clause[:2] if clause[:2] in ops else clause[:1]
-    parts = clause[len(op):].split(".")
-    if op not in ops or len(parts) > 3 or not all(p.isdigit() for p in parts):
-        sys.exit(3)
-    bound = tuple(int(p) for p in parts) + (0,) * (3 - len(parts))
-    ok = ok and ops[op](tuple(sys.version_info[:3]), bound)
-sys.exit(0 if ok else 1)
-' "\$1"
-}
-discover() {
-    local dir="\$PWD" venv spec
-    while [ "\${system}" = 0 ]; do
-        venv="\${dir}/.venv"
-        if [ -f "\${venv}/pyvenv.cfg" ] && [ -x "\${venv}/bin/python3" ]
-        then
-            if "\${venv}/bin/python3" -I -c '' > /dev/null 2>&1; then
-                interpreter="\${venv}/bin/python3"
-                return
-            fi
-        fi
-        [ -n "\${dir}" ] || break
-        dir="\${dir%/*}"
-    done
-    [ -z "\${FAKE_UV_NO_PYTHON-}" ] || [ -e "\${installed}" ] || return 0
-    if [ "\${project}" = 1 ]; then
-        spec="\$(requires_python)"
-        if [ -n "\${spec}" ]; then
-            satisfies "\${spec}" || {
-                [ "\$?" -eq 1 ] || unexpected requires-python "\${spec}"
-                return 0
-            }
-        fi
-    fi
-    interpreter='${python_bin}'
-}
-interpreter='' system=0 project=1
-if [ "\$*" = 'python install --no-bin' ]; then
-    : > "\${installed}"
-    exit 0
-fi
-if [ "\${1-} \${2-}" = 'python find' ]; then
-    [ "\${UV_NO_CONFIG-}" = '1' ] ||
-        unexpected "\$@" without UV_NO_CONFIG
-    for arg in "\${@:3}"; do
-        case "\${arg}" in
-            --system) system=1 ;;
-            --no-project) project=0 ;;
-            *) unexpected "\$@" ;;
-        esac
-    done
-    discover
-    [ -n "\${interpreter}" ] || exit 2
-    printf '%s\n' "\${interpreter}"
-    exit 0
-fi
-[ "\${1-} \${2-} \${3-}" = 'run --no-config --no-project' ] ||
+[ "\${1-} \${2-} \${3-} \${4-}" = 'run --no-config --no-project --cache-dir' ] ||
     unexpected "\$@"
-project=0
-shift 3
-if [ "\${1-}" = '--python' ]; then
-    case "\${2-}" in
-        /*) interpreter="\$2" ;;
-        *) unexpected "\$@" ;;
-    esac
-    shift 2
-else
-    discover
-    [ -n "\${interpreter}" ] || exit 2
-fi
+[ -n "\${5-}" ] || unexpected "\$@"
+[ "\${6-}" = '--python' ] || unexpected "\$@"
+case "\${7-}" in
+    /*) interpreter="\$7" ;;
+    *) unexpected "\$@" ;;
+esac
+shift 7
 [ "\${1-}" = 'python' ] || unexpected "\$@"
 shift
 exec "\${interpreter}" -S "\$@"
@@ -297,11 +201,9 @@ ws_count=0
 ws=''
 
 # The action's own directory, outside every workspace as a published
-# action's is, and holding no .venv. The steps look up their Python
-# from here. A case may point step_action_dir elsewhere.
+# action's is.
 action_dir="${workdir}/action"
 mkdir "${action_dir}"
-step_action_dir="${action_dir}"
 
 # project [+]<name>=<content>...: a fresh git repository holding each
 # file, tracked unless its name starts '+'. Sets ws to its real path.
@@ -351,18 +253,22 @@ errors=()
 #
 # Runs the step as the runner does, from the workspace root, under
 # 'bash --noprofile --norc -eo pipefail', in a clean environment.
-# Every input starts at its default and every plan output empty;
-# INPUT_*/PLAN_* pairs override them, FAKE_* pairs configure the
-# stand-ins.
+# Every input starts at its default and every plan output empty; the
+# plan step gets uv, its interpreter and its cache as the 'Set up uv'
+# and 'Install Python' steps would report them. INPUT_*/PLAN_* pairs,
+# and UV/PYTHON for the plan step, override them, FAKE_* pairs
+# configure the stand-ins.
 run_step() {
     local which="$1" workspace="$2" fakes="$3" pair
     local path="${workdir}/npm-global:${toolbin}"
     local script known fake_name
-    local -a env_list
+    local -a env_list provisioned=()
     shift 3
     if [ "${which}" = 'plan' ]; then
         script="${plan_script}" known="${plan_known}"
         env_list=("${plan_env[@]}")
+        provisioned=("UV=${toolbin}/uv" "PYTHON=${python_bin}"
+            "CACHE_DIR=${workdir}/uv-cache")
     else
         script="${node_script}" known="${node_known}"
         env_list=("${node_env[@]}")
@@ -397,11 +303,11 @@ run_step() {
         cd "${workspace}"
         env -i PATH="${path}" HOME="${HOME}" GIT_CONFIG_NOSYSTEM=1 \
             GITHUB_WORKSPACE="${workspace}" \
-            GITHUB_ACTION_PATH="${step_action_dir}" \
+            GITHUB_ACTION_PATH="${action_dir}" \
             GITHUB_OUTPUT="${workdir}/case/output" \
             GITHUB_STEP_SUMMARY="${workdir}/case/summary" \
             FAKE_LOG="${workdir}/case/calls.log" \
-            "${env_list[@]}" "$@" \
+            "${env_list[@]}" "${provisioned[@]+"${provisioned[@]}"}" "$@" \
             "${bash_bin}" --noprofile --norc -eo pipefail "${script}"
     ) > "${workdir}/case/out" 2>&1 || status=$?
 }
@@ -771,57 +677,15 @@ expect_outputs version=22 version_source='package.json engines.node'
 expect_nothing_planted_ran
 verdict 'a .venv above the workspace is not used'
 
-# A caller using the action from its own checkout: the action
-# directory is the workspace root ('uses: ./') or below it, so the
-# workspace's .venv is in or above the directory the steps look up
-# their Python from.
-for action_sub in '' /.github/actions/lint; do
+# uv, or the interpreter the 'Install Python' step reports, missing:
+# refused, never left to a lookup.
+for missing in UV PYTHON; do
     project package.json='{"engines": {"node": "22"}}' \
         package-lock.json="${lock_npm}"
-    plant_venv "${ws}"
-    step_action_dir="${ws}${action_sub}"
-    mkdir -p "${step_action_dir}"
-    run_step plan "${ws}" ''
-    step_action_dir="${action_dir}"
-    expect_status 0
-    expect_outputs version=22 version_source='package.json engines.node'
-    expect_nothing_planted_ran
-    verdict "the action at <workspace>${action_sub}: its .venv is not used"
-done
-
-# No Python installed: the step installs one, then finds it.
-project package.json='{"engines": {"node": "22"}}' \
-    package-lock.json="${lock_npm}"
-run_step plan "${ws}" '' FAKE_UV_NO_PYTHON=1
-expect_status 0
-expect_outputs version=22 version_source='package.json engines.node'
-[ -e "${workdir}/case/uv-python-installed" ] ||
-    check 'uv python install --no-bin did not run'
-verdict 'no Python installed: one is installed, then used'
-
-# The action directory inside a project whose requires-python no
-# Python on the runner satisfies, as for a caller using 'uses: ./'
-# from such a project. 'uv python find' keeps to that range unless
-# given '--no-project'. 'uv python install' ignores it, so with no
-# Python installed the lookup after the install must skip it too.
-for no_python in '' 1; do
-    for action_sub in '' /.github/actions/lint; do
-        project package.json='{"engines": {"node": "22"}}' \
-            package-lock.json="${lock_npm}" \
-            pyproject.toml=$'[project]\nname = "fixture"\nversion = "0"\nrequires-python = ">=2.7,<3"\n'
-        step_action_dir="${ws}${action_sub}"
-        mkdir -p "${step_action_dir}"
-        run_step plan "${ws}" '' FAKE_UV_NO_PYTHON="${no_python}"
-        step_action_dir="${action_dir}"
-        expect_status 0
-        expect_outputs version=22 version_source='package.json engines.node'
-        if [ -n "${no_python}" ]; then
-            [ -e "${workdir}/case/uv-python-installed" ] ||
-                check 'uv python install --no-bin did not run'
-        fi
-        label="the action at <workspace>${action_sub} in a project"
-        verdict "${label} requiring Python 2${no_python:+, none installed}"
-    done
+    run_step plan "${ws}" '' "${missing}="
+    expect_status 1
+    expect_line '::error::uv or its Python interpreter is missing ❌'
+    verdict "${missing} empty: refused"
 done
 
 project package.json='{"engines": "node"}' package-lock.json="${lock_npm}"
