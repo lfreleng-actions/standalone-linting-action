@@ -8,9 +8,11 @@
 # An earlier step of the caller's job may set PATH, UV_PYTHON*,
 # VIRTUAL_ENV, CONDA_PREFIX and the like through GITHUB_ENV or
 # GITHUB_PATH, and a checkout may hold a .venv or a .python-version.
-# action.yaml defends against that in three places, and this suite
+# action.yaml defends against that in four places, and this suite
 # pins each one, so a later edit cannot reopen the route silently:
 #
+#   - a step before 'Set up uv' refuses an inherited UV_NO_MODIFY_PATH,
+#     which would make setup-uv start the first uv on the caller's PATH;
 #   - the 'Set up uv' step refuses every interpreter lookup and keeps
 #     the inputs that would export settings to later steps unset;
 #   - the 'Install Python' step installs one uv-managed Python under
@@ -45,6 +47,7 @@ trap 'rm -rf "${workdir}"' EXIT
 status=0
 "${PY_RUN[@]}" - "${action}" > "${workdir}/out" 2>&1 <<'PYEOF' || status=$?
 import re
+import subprocess
 import sys
 
 import yaml
@@ -114,6 +117,30 @@ for name in ('python-version', 'activate-environment'):
     if name in inputs:
         problems.append(f'with sets {name}')
 check("'Set up uv' refuses lookups and exports nothing", problems)
+
+# --- Refuse an inherited UV_NO_MODIFY_PATH -----------------------------
+
+problems = []
+refuse = named('Refuse an inherited UV_NO_MODIFY_PATH')
+if refuse is None:
+    problems.append("expected one 'Refuse an inherited UV_NO_MODIFY_PATH'"
+                    " step")
+elif setup not in steps or steps.index(refuse) > steps.index(setup):
+    problems.append("it does not run before 'Set up uv'")
+else:
+    if 'if' in refuse:
+        problems.append(f"it is conditional: {refuse['if']!r}")
+    script = str(refuse.get('run', ''))
+    base = {'PATH': '/usr/bin:/bin'}
+    for label, extra, want in (('unset', {}, 0),
+                               ('empty', {'UV_NO_MODIFY_PATH': ''}, 1),
+                               ('set', {'UV_NO_MODIFY_PATH': '1'}, 1)):
+        result = subprocess.run(
+            ['bash', '-c', script], env={**base, **extra},
+            capture_output=True, text=True, check=False)
+        if (result.returncode == 0) != (want == 0):
+            problems.append(f'{label}: exit {result.returncode}')
+check('UV_NO_MODIFY_PATH is refused before setup-uv', problems)
 
 # --- Install Python ----------------------------------------------------
 
