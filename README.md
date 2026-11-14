@@ -653,6 +653,10 @@ the dependencies afresh.
   and its helpers with that interpreter, named by absolute path.
   `setup-uv`'s own cache stays off; with `cache_hooks: 'true'` an
   `actions/cache` step caches the action's uv cache instead
+- The action fails when the caller's job environment sets
+  `UV_NO_MODIFY_PATH`, to any value, even empty: `setup-uv` would
+  then run the first `uv` on the caller's `PATH`. Unset it before
+  calling the action
 - The action trusts the caller's `PATH` itself: the runner finds
   `bash` on it for every step, and `setup-uv` runs its own tools from
   it, so a caller that lets untrusted code write to `PATH` or
