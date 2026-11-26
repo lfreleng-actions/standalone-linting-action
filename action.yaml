@@ -802,7 +802,7 @@ runs:
       # Located by this name in tests/test-no-checkout.sh, which pins
       # the settings below.
       # yamllint disable-line rule:line-length
-      uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+      uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
       # For these inputs setup-uv's only uv call is 'uv python find',
       # run to report a Python version, and it executes the
       # interpreter that returns. That lookup follows the CALLER'S
